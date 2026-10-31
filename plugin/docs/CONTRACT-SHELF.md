@@ -1,6 +1,15 @@
 # reader — 书库持久化契约 (Shelf Persistence Contract)
 
-版本: 1.0 · 状态: 已冻结（宿主半边与客户端半边都必须严格遵守）
+版本: 1.2 · 状态: 已冻结（宿主半边与客户端半边都必须严格遵守）
+
+> **1.1 的变更**：书库列表不再整本整本地搬。新增 `books.summaries`（只带元数据，
+> 不带正文）供书库界面用；`books.list` 保持原样（整条记录）不变，读一本书的正文
+> 走 `books.get`。宿主与客户端都多了一个可以共用的纯函数目录 `src/shared/**`。
+> 详见 §2.1 与 §8.3。
+>
+> **1.2 的变更**：新增 `books.cover`（只换封面，不搬整本书）与封面的图片路由
+> `/api/reader/cover`；封面的地址带 `v=`（封面字节的哈希）与 `s=`（封面的字节数），
+> 客户端据此知道封面有多大，**不用下载就知道该不该缩小**。详见 §2.1 与 §2.5。
 
 ## 0. 为什么要有这份契约
 
@@ -54,14 +63,40 @@
 | action | payload | result |
 |---|---|---|
 | `books.list` | `{}` | `BookRecord[]`，按 `addedAt` 倒序 |
+| `books.summaries` | `{}` | `BookSummary[]`，按 `addedAt` 倒序 |
 | `books.get` | `{ id: string }` | `BookRecord \| null` |
 | `books.put` | `{ book: BookRecord }` | `{ id: string }` |
 | `books.progress` | `{ id: string, progress: object }` | `{ id: string }` |
+| `books.cover` | `{ id: string, cover: string }` | `{ id: string }` |
 | `books.delete` | `{ id: string }` | `{ id: string }` |
 
 **`books.list` 返回完整记录（含 `chapters`）**，与现在 `IndexedDB.getAll()` 的语义完全一致：
-书库界面要用 `chapters` 算词数与词频。请求体走 localhost，带一本小说的正文（几 MB）是可接受的，
-与今天浏览器里 `getAll()` 的开销同量级。
+读一本书的正文、算词频都用它。请求体走 localhost。
+
+**`books.summaries` 是书库界面真正要的那个动作**：它**不带 `chapters`**（一本小说的正文
+几百 KB，而书架只要封面、书名、进度）。实测六本书的整本列表是 3.37 MB（正文 1.36 MB +
+封面 1.86 MB），摘要列表只有几十 KB。摘要的形状：
+
+```js
+// src/lib/store.js
+BookSummary = {
+  id: string, title: string, author: string, format: string,
+  addedAt: number,
+  progress?: { …与 BookRecord.progress 相同… },
+  source?: { …与 BookRecord.source 相同… },
+  cover?: string,        // 封面（数据 URL 或图片地址，见下）
+  wordCount: number,     // 全书词数：与客户端 bookWordCount() 口径一致
+  chapterCount: number,
+  paragraphCount: number,
+}
+```
+
+- **词数由宿主算**，口径与客户端的 `bookWordCount()` 完全一致（同一个 `src/shared/**`
+  里的切词器），所以同一个词在两边永远是一个数。
+- **封面不随摘要走字节**。封面走自己的图片请求（§2.5），客户端 `<img>` 拿到就画。
+  书架先画占位图，图片到了再换上。
+- 摘要**不带 `chapters`**，所以词频弹窗（要算一本书里的词频）与详情弹窗（要章数、段数）
+  在打开时用 `books.get` 取那**一本**书的正文，不是一次取六本。
 
 **`books.progress` 是给「写进度」用的专用动作**：阅读时每翻一句都会写一次进度，如果走
 `books.get` + `books.put`，每次都要把整本书（几 MB）在网络上搬两个来回。`books.progress`
@@ -70,6 +105,17 @@
 - 合并语义：新的 `progress` 字段覆盖旧的同名字段，没提到的字段保留。
 - `progress.updatedAt` 由宿主填成当前时间。
 - 书不存在时**不报错**，返回 `{ id }` 即可（书可能刚被删掉）。
+
+**`books.cover` 是给「换封面」用的专用动作**，与 `books.progress` 同理：换封面走
+`books.get` + `books.put` 会把整本书（正文几 MB）在网络上搬两个来回，而换封面只需要
+搬那张小图（几十 KB）。`books.cover` 只传封面，**由宿主读出那本书、合并封面、写回**：
+
+- 合并语义：**只改 `cover` 这一个字段**，其余字段（`chapters`、`progress`、`source`、
+  `addedAt`……）**一律保持磁盘上的那份**。宿主不碰学习者的其它数据。
+- 封面是数据 URL 字符串，宿主**原样存下**（宿主不能重新编码图片：它没有画布）。
+- 书不存在时**不报错**，返回 `{ id }` 即可。
+- 旧宿主不认识这个动作，会回 `reader/unknown-action`；客户端这时退回
+  `books.get` + `books.put` 的老路，行为不变。
 
 ### 2.2 生词本（vocab）
 
@@ -94,6 +140,28 @@
 | `podcasts.list` | `{}` | `PodcastEpisode[]` |
 | `podcasts.put` | `{ episode: PodcastEpisode }` | `{ id: string }` |
 | `podcasts.delete` | `{ id: string }` | `{ id: string }` |
+
+### 2.5 封面图片（cover route）
+
+封面是**图片**，不是记录：它不该待在书库的 JSON 里（六本书的封面内联进去是 1.86 MB 的
+base64），所以它走自己的请求，办法与源文件一样（`SOURCE_ROUTE`）。
+
+```
+GET /api/reader/cover?id=<bookId>&v=<hash>&s=<size>
+```
+
+- 成功：**200**，响应体**就是图片字节本身**（`content-type: image/jpeg` 之类），
+  **没有 JSON 外壳** —— 地址要能直接放进 `<img src>`。
+- `id` 缺失：**400** + `{"ok":false,"error":{"code":"reader/cover-bad-request",…}}`。
+- 书没有封面：**404** + `{"ok":false,"error":{"code":"reader/cover-missing",…}}`。
+- `v=`：封面**字节**的哈希。换了封面 → 新地址（浏览器不能拿旧图）；只改了进度 →
+  地址不变（浏览器的图片缓存不能被一次写进度冲掉）。
+- `s=`：**存下来**的封面有多大（数据 URL 的长度，和客户端 `COVER_INLINE_MAX` 是同一个
+  口径）。客户端据此就知道该不该缩小这张图，**不用先下载才知道**——所以书架第二次
+  打开时，那几张还没缩小的图不会被白白下载一遍。读这个参数的地方是
+  `src/lib/cover-file.js` 的 `coverSizeOf()`，用它决定要不要排进缩小队列的是
+  `src/ui/page.js` 的后台队列。
+- 宿主按 `id` + 文件的 mtime + 大小缓存封面字节，重复请求不必重读那本书。
 
 记录形状沿用现有定义，**不要改字段名**：
 
@@ -307,9 +375,14 @@ export async function shelfReady(): Promise<void>   // 触发一次迁移，幂�
 1. 纯 ESM，`.js` 扩展名，`"type": "module"`。
 2. 客户端半边**不得** `import` 任何 `@deepseek-ai/dsh-*` 包，也不得 import `node:fs`。
 3. 宿主半边**不得** import `src/ui/**` 与 `src/lib/**`（客户端代码）。
+   **例外**：`src/shared/**` 两边都能 import —— 那里只放**纯函数**（无 DOM、无 React、
+   无 `node:*`），例如切词器与词数统计。词数由宿主算给摘要用，两边必须用**同一个**
+   切词器，否则同一个词在两边的数会不一样。
 4. 面向用户的报错文案用中文。
 5. 所有面向用户的报错文案用中文。
 6. 不要破坏现有的测试注入方式（`createVocabStore({ backend })`、`setNotesBackend()`、
    `setPodcastsBackend()`、`createMemoryBackend()`）。
 7. 宿主半边的改动需要**重启 Harness 应用**才生效；客户端半边需要 `node build.mjs`
    之后 **⌘R 刷新**。
+8. **磁盘上的记录原样保存**：宿主不裁字段、不改字段名（学习者的数据不能被宿主弄丢）。
+   `books.summaries` 只是**读**出来时少几个字段，不影响磁盘上的记录。

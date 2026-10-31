@@ -18,6 +18,16 @@ const DEFAULT_MAX_WIDTH = 320;
 /** The JPEG quality of a generated thumbnail. */
 const JPEG_QUALITY = 0.82;
 
+/**
+ * The biggest cover that may travel inside a book record.
+ *
+ * A 320 px JPEG at quality 0.82 is 20–30 KB of base64. The covers the image
+ * model draws are 832×1248 — 289 KB raw, 386 KB of base64 — which is why they
+ * do not belong in the shelf list. Anything above this size is re-encoded once
+ * and stored small.
+ */
+export const COVER_INLINE_MAX = 64 * 1024;
+
 /** The size of a generated placeholder cover (the usual 2:3 book ratio). */
 const PLACEHOLDER_WIDTH = 240;
 const PLACEHOLDER_HEIGHT = 360;
@@ -201,6 +211,47 @@ export async function coverToDataUrl(cover, maxWidth = DEFAULT_MAX_WIDTH) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Decode a data URL into the bytes it carries.
+ *
+ * The image model hands its picture over as a data URL (`data:image/png;base64,…`).
+ * To store it small it has to be decoded first, then shrunk by
+ * {@link coverToDataUrl}, then stored again.
+ *
+ * @param {string} url - the data URL.
+ * @returns {{ mime: string, bytes: Uint8Array } | null} the bytes, or null when
+ *   the URL is not a base64 data URL.
+ */
+export function dataUrlToCover(url) {
+  const value = String(url ?? '');
+  if (value === '') return null;
+  const match = /^data:([^;,]*)(;base64)?,([\s\S]*)$/.exec(value);
+  if (match === null) return null;
+  if (match[2] !== ';base64') return null;
+  const mime = String(match[1] ?? '').trim() || 'application/octet-stream';
+  try {
+    const binary = typeof atob === 'function'
+      ? atob(match[3] ?? '')
+      : Buffer.from(match[3] ?? '', 'base64').toString('binary');
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+    if (bytes.length === 0) return null;
+    return { mime, bytes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a stored cover is too big to travel inside a book record.
+ *
+ * @param {unknown} cover - the cover field of a book record.
+ * @returns {boolean} true when the cover should be re-encoded and stored small.
+ */
+export function isOversizedCover(cover) {
+  return typeof cover === 'string' && cover.length > COVER_INLINE_MAX;
 }
 
 /**

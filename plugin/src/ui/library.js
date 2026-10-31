@@ -8,8 +8,11 @@
  * with a book, so they must not wait for a hover.
  */
 import { createElement as h, useCallback, useEffect, useMemo, useState } from 'react';
-import { ImportIcon, TrashIcon, BookIcon, PlayIcon, MoreIcon } from './icons.js';
-import { bookWordCount, wordFrequency } from '../lib/frequency.js';
+import { ImportIcon, TrashIcon, BookIcon, PlayIcon, MoreIcon, CloseIcon, GridIcon, ListIcon } from './icons.js';
+import { bookWordCount, wordFrequency } from '../shared/word-count.js';
+import { coverObjectUrl } from '../lib/cover-file.js';
+import { formatBytes } from '../lib/source-file.js';
+import { getBook } from '../lib/store.js';
 
 /**
  * A human duration, split into minutes and seconds.
@@ -43,6 +46,20 @@ function formatWords(words) {
 }
 
 /**
+ * Fill `{name}` placeholders in a locale string. The locale service has no
+ * interpolation of its own, so the plugin does it here.
+ * @param {string} template
+ * @param {Record<string, number|string>} values
+ * @returns {string}
+ */
+function format(template, values) {
+  return Object.entries(values).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
+}
+
+/**
  * The first letters of a title, for the placeholder cover.
  * @param {string} title
  * @returns {string}
@@ -53,6 +70,60 @@ function initialsOf(title) {
   const words = trimmed.split(/\s+/).filter(Boolean);
   if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
   return `${words[0][0]}${words[1][0]}`.toUpperCase();
+}
+
+/**
+ * The picture of a cover.
+ *
+ * The picture travels on its own request (the shelf list carries only its
+ * address), so the shelf draws the placeholder first and the picture is put
+ * in when it arrives. A picture that does not come back at all — an
+ * application whose protocol handler does not serve plain image requests — is
+ * fetched by hand and handed over as an object URL.
+ *
+ * The placeholder and the picture are siblings, not nested: the stylesheet
+ * gives both of them their size from the cover box around them.
+ *
+ * @param {object} props
+ * @param {string} props.src - the address of the picture.
+ * @param {string} props.title - the title, for the placeholder.
+ * @returns {any[]} the placeholder and the picture
+ */
+function CoverPicture({ src, title }) {
+  const [objectUrl, setObjectUrl] = useState('');
+  const [broken, setBroken] = useState(false);
+
+  useEffect(() => {
+    if (broken !== true) return undefined;
+    // A picture that is already inline needs no second door.
+    if (typeof src !== 'string' || src === '' || src.startsWith('data:')) return undefined;
+    let cancelled = false;
+    coverObjectUrl(src)
+      .then((url) => { if (!cancelled) setObjectUrl(url); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [broken, src]);
+
+  const picture = objectUrl !== '' ? objectUrl : src;
+  // A picture that is already inline is there right away, so it needs no
+  // placeholder; one that still has to travel is drawn as a placeholder
+  // first — and the placeholder of a book without any picture stays.
+  const placeholder = typeof src !== 'string' || src === '' || !src.startsWith('data:');
+  return [
+    placeholder
+      ? h('div', { key: 'placeholder', className: 'er-cover-fallback' }, initialsOf(title))
+      : null,
+    picture !== ''
+      ? h('img', {
+        key: 'picture',
+        className: 'er-cover-image',
+        src: picture,
+        alt: '',
+        style: { position: 'absolute', left: 0, top: 0 },
+        onError: () => { setBroken(true); },
+      })
+      : null,
+  ];
 }
 
 /**
@@ -79,14 +150,22 @@ export function Modal({ title, onClose, children, size = 'default' }) {
     { className: 'er-modal-mask', onClick: onClose },
     h(
       'div',
-      { className: `er-modal${size === 'wide' ? ' is-wide' : ''}`, onClick: (event) => { event.stopPropagation(); } },
+      {
+        className: `er-modal${size === 'wide' ? ' is-wide' : ''}`,
+        role: 'dialog',
+        'aria-label': typeof title === 'string' ? title : undefined,
+        onClick: (event) => { event.stopPropagation(); },
+      },
+      // The body comes first in the document and the head is put back on top
+      // by the stylesheet. The panel's own drawing is then the first thing
+      // the document holds, and the dialog still carries its title.
+      children,
       h(
         'div',
         { className: 'er-modal-head' },
         h('div', { className: 'er-modal-title' }, title),
-        h('button', { type: 'button', className: 'er-round-button', onClick: onClose }, '✕'),
+        h('button', { type: 'button', className: 'er-round-button', onClick: onClose }, h(CloseIcon, { size: 16 })),
       ),
-      children,
     ),
   );
 }
@@ -104,11 +183,13 @@ export function Modal({ title, onClose, children, size = 'default' }) {
  * @param {'grid'|'list'} props.view
  * @param {Function} props.onViewChange
  * @param {Function} props.onListen
+ * @param {Function} [props.onOpenSource] - show the source file of a book
+ * @param {Function} [props.onDownloadSource] - download the source file
  * @returns {any} the element tree
  */
 export function LibraryView({
   t, books, error, onFiles, onOpen, onDelete, onRename, onGenerateCover,
-  view, onViewChange, onListen, build,
+  view, onViewChange, onListen, onOpenSource, onDownloadSource,
 }) {
   const [query, setQuery] = useState('');
   const [menuFor, setMenuFor] = useState(null);
@@ -175,15 +256,59 @@ export function LibraryView({
     }
   }, [onGenerateCover, t]);
 
+  // The word frequency of the book whose window is open.
+  //
+  // The frequency needs the text of the book, and the shelf list does not
+  // carry any: the one book is fetched when the window opens, not the whole
+  // shelf.
+  const [frequency, setFrequency] = useState(null);
+
   const showFrequency = (book) => {
     setMenuFor(null);
     setModal({ kind: 'frequency', book });
+    setFrequency(null);
+    getBook(book.id)
+      .then((full) => { setFrequency(wordFrequency(full?.chapters ?? [], 40)); })
+      .catch(() => { setFrequency([]); });
   };
 
   const showDetails = (book) => {
     setMenuFor(null);
     setModal({ kind: 'details', book });
   };
+
+  /**
+   * Whether the book still has its source file.
+   *
+   * The Host writes the metadata of the source file into the book record, so a
+   * book without that field simply has no source file — it was imported before
+   * the shelf kept them, or the file could not be stored.
+   *
+   * @param {object} book - the book.
+   * @returns {boolean} true when the source file is there.
+   */
+  const hasSource = (book) => {
+    const source = book?.source;
+    if (source === null || typeof source !== 'object') return false;
+    return typeof source.fileName === 'string' || Number(source.size) > 0;
+  };
+
+  // The source file of a book: the EPUB or PDF the learner imported.
+  const openSource = useCallback((book) => {
+    setMenuFor(null);
+    onOpenSource?.(book.id);
+  }, [onOpenSource]);
+
+  const downloadSource = useCallback(async (book) => {
+    setMenuFor(null);
+    setNotice({ kind: 'busy', text: t('library.sourceDownloading') });
+    try {
+      const name = await onDownloadSource?.(book.id);
+      setNotice({ kind: 'ok', text: format(t('library.sourceDownloaded'), { name: name ?? '' }) });
+    } catch (error) {
+      setNotice({ kind: 'error', text: error?.message ?? t('library.sourceFailed') });
+    }
+  }, [onDownloadSource, t]);
 
   const startRename = (book) => {
     setMenuFor(null);
@@ -242,9 +367,7 @@ export function LibraryView({
     return h(
       'div',
       { className: 'er-shelf-cover' },
-      book.cover
-        ? h('img', { className: 'er-cover-image', src: book.cover, alt: '' })
-        : h('div', { className: 'er-cover-fallback' }, initialsOf(book.title)),
+      h(CoverPicture, { src: book.cover ?? '', title: book.title }),
       h(
         'button',
         {
@@ -295,6 +418,28 @@ export function LibraryView({
       {
         type: 'button',
         className: 'er-book-menu-item',
+        disabled: !hasSource(book),
+        title: hasSource(book) ? t('library.sourceView') : t('library.sourceMissing'),
+        onClick: () => { openSource(book); },
+      },
+      t('library.sourceView'),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-book-menu-item',
+        disabled: !hasSource(book),
+        title: hasSource(book) ? t('library.sourceDownload') : t('library.sourceMissing'),
+        onClick: () => { void downloadSource(book); },
+      },
+      t('library.sourceDownload'),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-book-menu-item',
         disabled: pendingCover !== null,
         onClick: () => { void drawCover(book); },
       },
@@ -335,7 +480,7 @@ export function LibraryView({
         h(
           'div',
           { className: 'er-book-meta' },
-          `${book.author || t('library.unknownAuthor')} · ${String(book.format ?? '').toUpperCase()} · ${formatWords(bookWordCount(book.chapters))}`,
+          `${book.author || t('library.unknownAuthor')} · ${String(book.format ?? '').toUpperCase()} · ${formatWords(book.wordCount ?? bookWordCount(book.chapters))}`,
         ),
         h(
           'div',
@@ -359,7 +504,7 @@ export function LibraryView({
     if (modal === null) return null;
     const { kind, book } = modal;
     if (kind === 'frequency') {
-      const words = wordFrequency(book.chapters, 40);
+      const words = frequency ?? [];
       const max = words[0]?.count ?? 1;
       return h(
         Modal,
@@ -367,15 +512,17 @@ export function LibraryView({
         h(
           'div',
           { className: 'er-frequency' },
-          words.length === 0
-            ? h('div', { className: 'er-empty-hint' }, t('library.frequencyEmpty'))
-            : words.map((entry) => h(
-              'div',
-              { key: entry.word, className: 'er-frequency-row' },
-              h('span', { className: 'er-frequency-word' }, entry.word),
-              h('span', { className: 'er-frequency-bar' }, h('span', { style: { width: `${Math.round((entry.count / max) * 100)}%` } })),
-              h('span', { className: 'er-frequency-count' }, String(entry.count)),
-            )),
+          frequency === null
+            ? h('div', { className: 'er-empty-hint' }, t('library.loading'))
+            : words.length === 0
+              ? h('div', { className: 'er-empty-hint' }, t('library.frequencyEmpty'))
+              : words.map((entry) => h(
+                'div',
+                { key: entry.word, className: 'er-frequency-row' },
+                h('span', { className: 'er-frequency-word' }, entry.word),
+                h('span', { className: 'er-frequency-bar' }, h('span', { style: { width: `${Math.round((entry.count / max) * 100)}%` } })),
+                h('span', { className: 'er-frequency-count' }, String(entry.count)),
+              )),
         ),
       );
     }
@@ -384,14 +531,19 @@ export function LibraryView({
       const rows = [
         [t('library.detailAuthor'), book.author || t('library.unknownAuthor')],
         [t('library.detailFormat'), String(book.format ?? '').toUpperCase()],
-        [t('library.detailChapters'), String(book.chapters?.length ?? 0)],
-        [t('library.detailParagraphs'), String((book.chapters ?? []).reduce((sum, chapter) => sum + (chapter.paragraphs?.length ?? 0), 0))],
-        [t('library.detailWords'), formatWords(bookWordCount(book.chapters))],
+        [t('library.detailChapters'), String(book.chapterCount ?? book.chapters?.length ?? 0)],
+        [t('library.detailParagraphs'), String(book.paragraphCount ?? (book.chapters ?? []).reduce((sum, chapter) => sum + (chapter.paragraphs?.length ?? 0), 0))],
+        [t('library.detailWords'), formatWords(book.wordCount ?? bookWordCount(book.chapters))],
         [t('library.detailProgress'), `${Math.round((book.progress?.percent ?? 0) * 100)}%`],
         [t('library.detailReadWords'), formatWords(activity?.totalWords ?? 0)],
         [t('library.detailReadTime'), formatDuration(activity?.totalMs ?? 0)],
         [t('library.detailAdded'), new Date(book.addedAt ?? Date.now()).toLocaleDateString()],
       ];
+      // 源文件在详情里也占一行：学习者一眼就知道这本书还能不能带走。
+      if (hasSource(book)) {
+        rows.push([t('source.fileName'), book.source.fileName || '—']);
+        rows.push([t('source.size'), formatBytes(book.source.size)]);
+      }
       return h(
         Modal,
         { title: book.title, onClose: () => { setModal(null); } },
@@ -435,12 +587,6 @@ export function LibraryView({
   return h(
     'div',
     { className: 'er-library' },
-    h(
-      'div',
-      { className: 'er-library-head' },
-      h('div', { className: 'er-library-title' }, t('tab.library')),
-      build === undefined ? null : h('span', { className: 'er-library-build', title: 'Build' }, build),
-    ),
     notice === null
       ? null
       : h(
@@ -471,7 +617,7 @@ export function LibraryView({
           title: view === 'grid' ? t('library.viewList') : t('library.viewGrid'),
           onClick: () => { onViewChange?.(view === 'grid' ? 'list' : 'grid'); },
         },
-        view === 'grid' ? '▦' : '☰',
+        view === 'grid' ? h(GridIcon, { size: 16 }) : h(ListIcon, { size: 16 }),
       ),
     ),
     error ? h('div', { className: 'er-error' }, error) : null,

@@ -16,7 +16,10 @@
     "client.pdf.js",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "src/host/**",
+    "src/lib/**",
+    "src/shared/**"
   ],
   "dsh": {
     "bundle": {

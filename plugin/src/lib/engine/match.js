@@ -1,11 +1,11 @@
 /**
  * 比对层：打字逐字比对、朗读词级对齐、语速统计。
  *
- * 纯 ESM，不依赖 React，不依赖 DOM。依赖 segment.js 的 tokenize，保证
+ * 纯 ESM，不依赖 React，不依赖 DOM。依赖 shared/segment.js 的 tokenize，保证
  * 「引擎切词」与「比对切词」是同一套规则。
  */
 
-import { tokenize } from './segment.js';
+import { tokenize } from '../../shared/segment.js';
 
 /**
  * 把字符转成可比形式：小写 + 直引号化。

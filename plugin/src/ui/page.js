@@ -6,14 +6,18 @@
  */
 import { Component, createElement as h, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { parseBook } from '../lib/parsers/index.js';
-import { coverToDataUrl, generateCover as drawPlaceholderCover } from '../lib/cover.js';
-import { buildUnits } from '../lib/engine/segment.js';
+import { coverToDataUrl, dataUrlToCover, generateCover as drawPlaceholderCover, isOversizedCover, COVER_INLINE_MAX } from '../lib/cover.js';
+import { coverSizeOf, fetchCoverBytes } from '../lib/cover-file.js';
+import { buildUnits } from '../shared/segment.js';
 import { askAi } from '../lib/ai.js';
-import { deleteBook, getBook, listBooks, newBookId, saveBook, updateProgress } from '../lib/store.js';
+import { deleteBook, getBook, listBookSummaries, newBookId, saveBook, saveBookCover, updateProgress } from '../lib/store.js';
+import { downloadSourceFile, uploadSourceFile } from '../lib/source-file.js';
 import { LibraryView } from './library.js';
 import { ImportCard } from './import-card.js';
+import { GlobeIcon, ImportIcon, MoreIcon } from './icons.js';
 import { OnlineLibrary } from './online-library.js';
 import { ReaderView } from './reader.js';
+import { SourcePreview } from './source-preview.js';
 import { WordList } from './wordlist.js';
 
 
@@ -111,23 +115,144 @@ export function EnglishReaderPage({ t, build }) {
   const [sort, setSort] = useState('recent');
   const [menuOpen, setMenuOpen] = useState(false);
   const [sourceOpen, setSourceOpen] = useState(false);
+  // The book whose source file is being looked at.
+  const [previewBookId, setPreviewBookId] = useState(null);
   const fileRef = useRef(null);
   const saveTimer = useRef(null);
   const importStartedAt = useRef(0);
   const importHideTimer = useRef(null);
+  // The covers that still have to be shrunk, and the ones that are being
+  // shrunk right now.
+  const coverQueue = useRef([]);
+  const coverWorker = useRef(false);
+  const coverDone = useRef(new Set());
+  const coverTimer = useRef(null);
+  // The shelf is read again after a cover was shrunk. It is reached through
+  // a ref, because the shelf read is what fills the queue in the first
+  // place: the two must not depend on each other.
+  const refreshRef = useRef(null);
+  // The book that is being read: its record is not written back by the
+  // background worker.
+  const activeBookRef = useRef(null);
+
+  // The books as they are right now: the shelf list is patched in place
+  // (a book that was read on gets its progress changed), so the newest
+  // progress has to be readable from here and not from a stale copy.
+  const booksRef = useRef(books);
+  useEffect(() => { booksRef.current = books; }, [books]);
+
+  // Shrink one cover and write the small one back.
+  //
+  // The cover is shrunk in the browser — the Host has no canvas and cannot
+  // do it. Only the picture travels: the Host merges the new cover into the
+  // record, so the text, the progress and the source file stay as they are
+  // and the reading position of a book that is being read is never lost to
+  // a picture.
+  //
+  // @param {string} id - the book.
+  // @param {{ mime: string, bytes: Uint8Array }|null} picture - the picture.
+  // @returns {Promise<boolean>} true when the cover was shrunk.
+  const shrinkCoverOf = useCallback(async (id, picture) => {
+    if (picture === null || picture === undefined) return false;
+    if (coverDone.current.has(id)) return false;
+    coverDone.current.add(id);
+    try {
+      const small = await coverToDataUrl(picture);
+      if (typeof small !== 'string' || small === '') return false;
+      await saveBookCover(id, small);
+      return true;
+    } catch (error) {
+      console.warn('[reader] 封面缩小失败：' + (error?.message ?? String(error)));
+      return false;
+    }
+  }, []);
+
+  // The worker: one book at a time, in the background.
+  const runCoverWorker = useCallback(async () => {
+    if (coverWorker.current) return;
+    coverWorker.current = true;
+    try {
+      while (coverQueue.current.length > 0) {
+        const book = coverQueue.current.shift();
+        if (book === undefined) break;
+        // The book that is being read is left to the reader: writing its
+        // record back while the learner reads on would race with the
+        // progress writes.
+        if (book.id === activeBookRef.current) continue;
+        try {
+          // The bytes of the picture come from the picture's own route: the
+          // record of the book does not have to travel at all.
+          const { bytes, mime } = await fetchCoverBytes(book.cover);
+          const shrunk = await shrinkCoverOf(book.id, { mime, bytes });
+          // The shelf points at the old picture: the new address has to come
+          // from the Host, or the grid keeps showing the old one.
+          if (shrunk) await refreshRef.current?.();
+        } catch (error) {
+          console.warn('[reader] 封面缩小失败：' + (error?.message ?? String(error)));
+        }
+      }
+    } finally {
+      coverWorker.current = false;
+    }
+  }, [shrinkCoverOf]);
+
+  // The covers that are still the full size of the model's drawing are
+  // shrunk once, in the background.
+  //
+  // A learner who only looks at the shelf never opens a book, so the big
+  // picture would be downloaded on every visit — forever. The shelf must
+  // not wait for this: the work starts once the panel is interactive, and
+  // one book at a time.
+  const scheduleCoverShrink = useCallback((summaries) => {
+    const waiting = [];
+    for (const book of summaries ?? []) {
+      const cover = typeof book?.cover === 'string' ? book.cover : '';
+      if (cover === '') continue;
+      // The size of the stored cover: the address says it for a picture
+      // that travels on its own route, and a picture that is already inline
+      // says it itself.
+      const size = cover.startsWith('data:') ? cover.length : coverSizeOf(cover);
+      if (size <= COVER_INLINE_MAX) continue;
+      if (coverDone.current.has(book.id)) continue;
+      waiting.push(book);
+    }
+    if (waiting.length === 0) return;
+    coverQueue.current.push(...waiting);
+    if (coverTimer.current !== null) return;
+    coverTimer.current = window.setTimeout(() => {
+      coverTimer.current = null;
+      void runCoverWorker();
+    }, 600);
+  }, [runCoverWorker]);
 
   const refresh = useCallback(async () => {
     try {
-      const stored = await listBooks();
+      // The shelf shows the books, not their text: the summaries are a few
+      // kilobytes where the whole shelf is megabytes.
+      const stored = await listBookSummaries();
       setBooks(stored);
+      scheduleCoverShrink(stored);
     } catch (loadError) {
       setError(loadError?.message ?? t('library.loadFailed'));
     }
-  }, [t]);
+  }, [scheduleCoverShrink, t]);
+
+  // The worker needs the newest shelf read, but the shelf read fills the
+  // worker's queue — so the two meet here, and not through each other.
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+
+  useEffect(() => { activeBookRef.current = activeBookId; }, [activeBookId]);
 
   useEffect(() => {
     refresh().finally(() => { setLoaded(true); });
   }, [refresh]);
+
+  // Leaving the panel stops the background work.
+  useEffect(() => () => {
+    if (coverTimer.current !== null) window.clearTimeout(coverTimer.current);
+    coverTimer.current = null;
+    coverQueue.current = [];
+  }, []);
 
   // The reading position is written once the learner stops moving.
   useEffect(() => {
@@ -152,11 +277,15 @@ export function EnglishReaderPage({ t, build }) {
     try {
       const result = await askAi('cover', { title: book.title });
       if (typeof result?.url !== 'string' || result.url === '') return false;
+      // The picture the model draws is 832×1248 — nearly 400 KB of base64.
+      // The shelf draws a cover at 168 px, so the picture is shrunk to a
+      // thumbnail first, exactly like an imported cover.
+      const small = await coverToDataUrl(dataUrlToCover(result.url)) ?? result.url;
       // The book may have been renamed or deleted while the cover was drawn,
       // so the stored copy is read again instead of the one we started with.
       const stored = await getBook(book.id);
       if (stored === undefined) return false;
-      await saveBook({ ...stored, cover: result.url });
+      await saveBook({ ...stored, cover: small });
       await refresh();
       return true;
     } catch {
@@ -238,6 +367,13 @@ export function EnglishReaderPage({ t, build }) {
     };
     report({ stage: 'save', ratio: 0 });
     await saveBook(book);
+    // 原始文件也交给宿主存着：书要能看原样，也要能下载走。
+    // 存不住不影响导入——书照样入库，只是这本书没有源文件。
+    try {
+      await uploadSourceFile(book.id, file, { format: parsed.format, contentType: file?.type });
+    } catch (error) {
+      console.warn('[reader] 源文件没有存住：' + (error?.message ?? String(error)));
+    }
     report({ stage: 'save', ratio: 1 });
     return { book, hasRealCover };
   }, []);
@@ -290,14 +426,29 @@ export function EnglishReaderPage({ t, build }) {
   const [autoPlayToken, setAutoPlayToken] = useState(0);
 
   const openBook = useCallback(async (id) => {
-    const book = books.find((entry) => entry.id === id);
-    if (book === undefined) return;
-    const nextUnits = buildUnits(book.chapters ?? []);
+    // The shelf list carries the metadata, not the text: the text of this one
+    // book is fetched here, when the learner opens it.
+    const stored = await getBook(id);
+    if (stored === undefined) return;
+    const nextUnits = buildUnits(stored.chapters ?? []);
+    const local = booksRef.current.find((entry) => entry.id === id);
+    const progress = local?.progress ?? stored.progress;
     setUnits(nextUnits);
     setActiveBookId(id);
-    setIndex(Math.min(Math.max(0, book.progress?.unitIndex ?? 0), Math.max(0, nextUnits.length - 1)));
+    setIndex(Math.min(Math.max(0, progress?.unitIndex ?? 0), Math.max(0, nextUnits.length - 1)));
     setTab('reader');
-  }, [books]);
+    // The cover of this book may still be the full size of the model's
+    // picture. It is shrunk in the background — the book opens right away,
+    // and the picture is in the record that was read just now, so nothing is
+    // fetched twice.
+    if (isOversizedCover(stored?.cover)) {
+      void shrinkCoverOf(id, dataUrlToCover(stored.cover)).then((shrunk) => {
+        // The shelf points at the old picture: the new address has to come
+        // from the Host, or the grid keeps showing the old one.
+        if (shrunk) void refresh();
+      });
+    }
+  }, [refresh, shrinkCoverOf]);
 
   // Open a book and let it read itself out loud.
   const listenBook = useCallback(async (id) => {
@@ -326,23 +477,47 @@ export function EnglishReaderPage({ t, build }) {
   }, [activeBookId, refresh]);
 
   const onRename = useCallback(async (id, title) => {
-    const book = books.find((entry) => entry.id === id);
-    if (book === undefined) return;
-    await saveBook({ ...book, title });
+    // The shelf holds summaries, not whole records: the record is read
+    // first, so the book keeps its text.
+    const stored = await getBook(id);
+    if (stored === undefined) return;
+    await saveBook({ ...stored, title });
     await refresh();
-  }, [books, refresh]);
+  }, [refresh]);
+
+  // The source file of a book: the EPUB or PDF the learner imported.
+  const openSource = useCallback((id) => {
+    setPreviewBookId(id);
+  }, []);
+
+  const downloadSource = useCallback(async (id) => {
+    return downloadSourceFile(id);
+  }, []);
 
   // The reader reports how long and how much was read; it lands on the book.
   const onActivity = useCallback(async (activity, playedMs) => {
     if (activeBookId === null) return;
     await updateProgress(activeBookId, { activity, playedMs });
     // The shelf shows the reading situation, so it has to see the new numbers.
-    setBooks(await listBooks());
+    // Asking for the whole shelf again would move three megabytes on every
+    // sentence the learner turns, so the one book that changed is patched
+    // here instead — the reader reads its numbers from this same list.
+    setBooks((previous) => previous.map((book) => (
+      book.id === activeBookId
+        ? { ...book, progress: { ...book.progress, activity, playedMs, updatedAt: Date.now() } }
+        : book
+    )));
   }, [activeBookId]);
 
   const activeBook = useMemo(
     () => books.find((entry) => entry.id === activeBookId) ?? null,
     [books, activeBookId],
+  );
+
+  // The book whose source file is being looked at.
+  const previewBook = useMemo(
+    () => books.find((entry) => entry.id === previewBookId) ?? null,
+    [books, previewBookId],
   );
 
   // The shelf can be sorted the way a learner expects.
@@ -395,7 +570,7 @@ export function EnglishReaderPage({ t, build }) {
       h(
         'div',
         { className: 'er-appbar-left' },
-        h('button', { type: 'button', className: 'er-round-button', title: t('library.import'), onClick: pickFile }, '＋'),
+        h('button', { type: 'button', className: 'er-round-button', title: t('library.import'), onClick: pickFile }, h(ImportIcon, { size: 16 })),
         h(
           'button',
           {
@@ -404,7 +579,7 @@ export function EnglishReaderPage({ t, build }) {
             title: t('source.title'),
             onClick: () => { setSourceOpen(true); },
           },
-          '🌐',
+          h(GlobeIcon, { size: 16 }),
         ),
       ),
       h(
@@ -434,7 +609,7 @@ export function EnglishReaderPage({ t, build }) {
             title: t('library.shelfMenu'),
             onClick: () => { setMenuOpen((value) => !value); },
           },
-          '⋯',
+          h(MoreIcon, { size: 16 }),
         ),
         menuOpen
           ? h(
@@ -456,6 +631,17 @@ export function EnglishReaderPage({ t, build }) {
               },
               label,
             )),
+            // The build stamp lives here now. It used to sit next to the
+            // library title, but that title repeated the tab bar; the stamp
+            // is the only way to tell a fresh window from a stale one, so it
+            // goes where it is asked for instead of where it was displayed.
+            build === undefined
+              ? null
+              : h(
+                'div',
+                { className: 'er-book-menu-build', title: t('library.build') },
+                `${t('library.build')} ${build}`,
+              ),
           )
           : null,
       ),
@@ -468,7 +654,6 @@ export function EnglishReaderPage({ t, build }) {
         ? h(LibraryView, {
           t,
           books: sorted,
-          build,
           error,
           view,
           onViewChange: changeView,
@@ -477,6 +662,8 @@ export function EnglishReaderPage({ t, build }) {
           onDelete,
           onRename,
           onListen: listenBook,
+          onOpenSource: openSource,
+          onDownloadSource: downloadSource,
           onGenerateCover: (id) => {
             const book = books.find((entry) => entry.id === id);
             if (book === undefined) return Promise.resolve(false);
@@ -516,6 +703,21 @@ export function EnglishReaderPage({ t, build }) {
         t,
         onClose: () => { setSourceOpen(false); },
         onImported,
+      })
+      : null,
+    // The source file of a book: the EPUB or PDF the learner imported.
+    previewBook !== null
+      ? h(SourcePreview, {
+        t,
+        book: previewBook,
+        onClose: () => { setPreviewBookId(null); },
+        onDownload: async () => {
+          try {
+            await downloadSource(previewBook.id);
+          } catch (error) {
+            console.warn('[reader] 源文件下载失败：' + (error?.message ?? String(error)));
+          }
+        },
       })
       : null,
     h('input', {

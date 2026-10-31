@@ -9,6 +9,7 @@
  * 磁盘布局（契约 docs/CONTRACT-SHELF.md 第 3 节）：
  *
  *   <dir>/books/<bookId>.json   一本书一个文件（整条记录）
+ *   <dir>/sources/<bookId>.<ext> 一本书的原始文件（导入时的那个 EPUB/PDF）
  *   <dir>/vocabulary.json       { "<id>": VocabEntry }
  *   <dir>/notes.json            { "<id>": Note }
  *   <dir>/podcasts.json         { "<id>": PodcastEpisode }
@@ -22,15 +23,20 @@
  *   3. 记录原样保存，不裁字段、不校验 schema：学习者的数据不能被宿主弄丢。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+
+import { bookWordCount } from '../shared/word-count.js';
 
 /** 书库根目录的缺省值：与 MiniMax 的 key、Gutenberg 的目录同处。 */
 export const DEFAULT_DIR = join(homedir(), '.dsh', 'reader');
 
 /** 一本书一个文件，放在这个子目录里；第一次写入时才创建。 */
 const BOOKS_DIR = 'books';
+
+/** 一本书的原始文件放在这个子目录里。 */
+const SOURCES_DIR = 'sources';
 
 /** 生词本、笔记、播客各一个文件，整张表放在里面。 */
 const VOCAB_FILE = 'vocabulary.json';
@@ -39,6 +45,65 @@ const PODCASTS_FILE = 'podcasts.json';
 
 /** 每个文件一条链：读改写不能交叉，否则并行的写入会互相覆盖。 */
 const writeChains = new Map();
+
+/**
+ * 摘要缓存最多留多少本书。
+ *
+ * 书架上的书不会多到哪儿去，但缓存也不该跟着书架一直长：一个学习者一生
+ * 导入几百本书已经够了，超出就把最旧的那些丢掉。
+ */
+const SUMMARY_CACHE_LIMIT = 512;
+
+/**
+ * 封面的默认路由。
+ *
+ * 封面不走 JSON：书库摘要里只放一个地址，图片字节自己走一次请求
+ * （与源文件同一套办法）。宿主注册路由时会把真正的路径传进来。
+ */
+const DEFAULT_COVER_ROUTE = '/api/reader/cover';
+
+/**
+ * 把一张 data URL 拆成它的字节。
+ *
+ * 封面在记录里是 data URL（`data:image/jpeg;base64,...`），宿主没有画布，
+ * 不能改图片，只能把里面的字节原样取出来。
+ *
+ * @param {any} value - 记录里的封面字段。
+ * @returns {{ mime: string, bytes: Uint8Array }|null} 字节，认不出来时是 null。
+ */
+function parseDataUrl(value) {
+  if (typeof value !== 'string' || value === '') return null;
+  const match = /^data:([^;,]*)(;base64)?,([\s\S]*)$/.exec(value);
+  if (match === null) return null;
+  if (match[2] !== ';base64') return null;
+  const mime = String(match[1] ?? '').trim() || 'application/octet-stream';
+  try {
+    const bytes = new Uint8Array(Buffer.from(match[3] ?? '', 'base64'));
+    if (bytes.length === 0) return null;
+    return { mime, bytes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 一段文字的短哈希（FNV-1a）。
+ *
+ * 封面地址里带着这个哈希：封面换了，地址就换，浏览器才不会拿缓存里的旧图；
+ * 而阅读进度变了不会换封面，地址不变，图片也不会被重新下载一遍。
+ *
+ * @param {string} text - 要哈希的文字。
+ * @returns {string} 一个短的、稳定的字符串。
+ */
+function hashText(text) {
+  let hash = 0x811c9dc5;
+  const value = String(text ?? '');
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return (hash >>> 0).toString(36);
+}
 
 /**
  * 记录在磁盘上的文件名：只允许 [A-Za-z0-9_-]，其余字符一律换成下划线。
@@ -121,6 +186,54 @@ function writeJsonAtomic(file, value) {
 }
 
 /**
+ * 原子地写一个二进制文件：先写 `<file>.tmp`，再 rename 覆盖目标。
+ *
+ * @param {string} file - 目标文件。
+ * @param {Uint8Array} bytes - 要写进去的字节。
+ */
+function writeBytesAtomic(file, bytes) {
+  mkdirSync(dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  try {
+    writeFileSync(tmp, bytes);
+    renameSync(tmp, file);
+  } catch (error) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 临时文件本来就不在了。
+    }
+    throw error;
+  }
+}
+
+/**
+ * 源文件的格式名：只允许小写字母与数字，其余换成下划线；空格式退回 `bin`。
+ *
+ * @param {any} format - 格式名。
+ * @returns {string} 安全的格式名。
+ */
+export function safeFormat(format) {
+  const name = String(format ?? '').trim().toLowerCase().replace(/[^a-z0-9]/g, '_');
+  return name === '' ? 'bin' : name;
+}
+
+/**
+ * 把各种字节容器统一成 Uint8Array。
+ *
+ * @param {any} value - 字节。
+ * @returns {Uint8Array|null} 字节，认不出来时是 null。
+ */
+function toBytes(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  if (Array.isArray(value)) return new Uint8Array(value);
+  return null;
+}
+
+/**
  * 让同一个文件上的写操作排队执行。
  *
  * @param {string} key - 文件路径。
@@ -190,6 +303,52 @@ function removeTableEntry(file, id) {
 }
 
 /**
+ * 一本书的摘要：书架要的那些字段，不带正文。
+ *
+ * 词数由宿主算，用的是客户端同一个切词器（`src/shared/word-count.js`），
+ * 所以同一个词在两边的数永远一样。
+ *
+ * @param {object} record - 整条记录。
+ * @param {string} coverRoute - 封面的图片路由。
+ * @returns {object} 摘要。
+ */
+function summariseBook(record, coverRoute) {
+  const chapters = Array.isArray(record?.chapters) ? record.chapters : [];
+  let paragraphs = 0;
+  for (const chapter of chapters) {
+    if (Array.isArray(chapter?.paragraphs)) paragraphs += chapter.paragraphs.length;
+  }
+  const cover = typeof record?.cover === 'string' ? record.cover : '';
+  // 封面地址里带着封面自己的哈希：封面换了地址就换（浏览器不会拿旧图），
+  // 进度变了地址不变（图片不会被重新下载一遍）。
+  const id = String(record?.id ?? '');
+  let coverUrl = '';
+  if (cover !== '') {
+    if (cover.startsWith('data:')) {
+      // `s` 是封面存下来的大小：页面据此知道这张图大不大，不必先下载
+      // 才知道。大图要重新缩小存一次，小图不用管。
+      coverUrl = `${coverRoute}?id=${encodeURIComponent(id)}&v=${hashText(cover)}&s=${cover.length}`;
+    } else {
+      // 本来就是一个地址（在网上的图片）：浏览器自己去拿。
+      coverUrl = cover;
+    }
+  }
+  return {
+    id,
+    title: typeof record?.title === 'string' ? record.title : '',
+    author: typeof record?.author === 'string' ? record.author : '',
+    format: typeof record?.format === 'string' ? record.format : '',
+    addedAt: Number(record?.addedAt) || 0,
+    progress: isRecord(record?.progress) ? record.progress : {},
+    source: isRecord(record?.source) ? record.source : undefined,
+    cover: coverUrl,
+    wordCount: bookWordCount(chapters),
+    chapterCount: chapters.length,
+    paragraphCount: paragraphs,
+  };
+}
+
+/**
  * 建一个书库。
  *
  * @param {{ dir?: string, profileDir?: string }} [options] - dir 是书库根目录；
@@ -199,9 +358,42 @@ function removeTableEntry(file, id) {
 export function createShelf(options = {}) {
   const dir = resolveDir(options);
   const booksDir = join(dir, BOOKS_DIR);
+  const sourcesDir = join(dir, SOURCES_DIR);
   const vocabFile = join(dir, VOCAB_FILE);
   const notesFile = join(dir, NOTES_FILE);
   const podcastsFile = join(dir, PODCASTS_FILE);
+  // 封面走自己的图片路由：摘要里只放地址，字节另外走一次请求。
+  const coverRoute = typeof options.coverRoute === 'string' && options.coverRoute.trim() !== ''
+    ? options.coverRoute.trim()
+    : DEFAULT_COVER_ROUTE;
+
+  /**
+   * 摘要缓存：书文件的名字（由书 id 派生）→ { id, mtimeMs, size, summary }。
+   *
+   * 文件没动过就不重新解析、不重新切词：六本书 3.4 MB 的 JSON 每次列一次
+   * 要解析一遍、切一遍词，而书架列表在阅读时会被问很多次。
+   */
+  const summaryCache = new Map();
+
+  /**
+   * 封面字节缓存：书 id → { mtimeMs, size, bytes, mime }。
+   *
+   * 封面要从整本书的 JSON 里挖出来（宿主没有画布，改不了图，只能取字节），
+   * 所以挖一次就留着，别每来一个图片请求就重新解析一遍整本书。
+   */
+  const coverCache = new Map();
+
+  /**
+   * 丢掉一本书的缓存条目。
+   *
+   * @param {string} id - 书的 id。
+   */
+  const dropCache = (id) => {
+    const key = typeof id === 'string' ? id : '';
+    if (key === '') return;
+    summaryCache.delete(`${safeFileName(key)}.json`);
+    coverCache.delete(key);
+  };
 
   /**
    * 一本书在磁盘上的路径。
@@ -210,6 +402,72 @@ export function createShelf(options = {}) {
    * @returns {string} 路径。
    */
   const bookFile = (id) => join(booksDir, `${safeFileName(id)}.json`);
+
+  /**
+   * 一本书的原始文件在磁盘上的路径。
+   *
+   * @param {string} id - 书的 id。
+   * @param {string} format - 格式名（epub、pdf……）。
+   * @returns {string} 路径。
+   */
+  const sourceFile = (id, format) => join(sourcesDir, `${safeFileName(id)}.${safeFormat(format)}`);
+
+  /**
+   * 这本书在 sources/ 下的文件：先按记录的格式找，再按目录里实际有的找。
+   *
+   * @param {string} id - 书的 id。
+   * @param {object} [record] - 那本书的记录（可能没有 source 字段）。
+   * @returns {string|null} 路径，没有源文件时是 null。
+   */
+  const findSourceFile = (id, record = null) => {
+    const known = safeFormat(record?.source?.format);
+    const exact = sourceFile(id, known);
+    if (existsSync(exact)) return exact;
+    // 记录里的格式可能对不上（老记录、或者格式变了）：按前缀在目录里找一遍。
+    const prefix = `${safeFileName(id)}.`;
+    let names = [];
+    try {
+      names = readdirSync(sourcesDir);
+    } catch {
+      return undefined;
+    }
+    for (const name of names) {
+      if (!name.startsWith(prefix)) continue;
+      if (name.endsWith('.tmp')) continue;
+      return join(sourcesDir, name);
+    }
+    return undefined;
+  };
+
+  /**
+   * 把一份源文件的元数据读出来。
+   *
+   * @param {string} id - 书的 id。
+   * @param {object} [record] - 那本书的记录。
+   * @returns {object|undefined} 元数据，没有源文件时是 undefined。
+   */
+  const readSourceMeta = (id, record = null) => {
+    const file = findSourceFile(id, record);
+    if (file === undefined) return undefined;
+    let size = 0;
+    let storedAt = Date.now();
+    try {
+      const info = statSync(file);
+      size = Number(info.size) || 0;
+      storedAt = Number(info.mtimeMs) || Date.now();
+    } catch {
+      // 读不到大小就用 0：文件多半正在被写。
+    }
+    const known = isRecord(record?.source) ? record.source : {};
+    const format = safeFormat(known.format ?? file.slice(file.lastIndexOf('.') + 1));
+    return {
+      fileName: typeof known.fileName === 'string' ? known.fileName : '',
+      format,
+      contentType: typeof known.contentType === 'string' ? known.contentType : '',
+      size: Number(known.size) || size,
+      storedAt: Number(known.storedAt) || storedAt,
+    };
+  };
 
   return {
     /** 书库根目录。 */
@@ -247,6 +505,66 @@ export function createShelf(options = {}) {
     },
 
     /**
+     * 书的摘要：书架要的那些字段，不带正文。
+     *
+     * 整本书的记录里，正文（`chapters`）占大头，封面是 base64 的图片，
+     * 六本书就是 3.37 MB——而书架只要封面、书名、进度和词数。所以这里给
+     * 另一个投影：词数由宿主用同一个切词器算（`src/shared/word-count.js`），
+     * 封面只给地址，字节自己走图片路由。
+     *
+     * 没有动过的书不重新解析：文件的名字、修改时间与大小都在缓存里。
+     *
+     * @returns {Promise<object[]>} 书的摘要，按加入时间倒序。
+     */
+    async listBookSummaries() {
+      let names = [];
+      try {
+        names = readdirSync(booksDir);
+      } catch {
+        // 还没写过：books/ 目录不存在。
+        return [];
+      }
+      const summaries = [];
+      for (const name of names) {
+        // 写了一半的 .tmp 不是一本书。
+        if (!name.endsWith('.json')) continue;
+        const file = join(booksDir, name);
+        let info = null;
+        try {
+          info = statSync(file);
+        } catch {
+          // 文件正在被删：跳过。
+          continue;
+        }
+        const mtimeMs = Number(info.mtimeMs) || 0;
+        const size = Number(info.size) || 0;
+        const cached = summaryCache.get(name);
+        if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) {
+          summaries.push(cached.summary);
+          continue;
+        }
+        const record = readJson(file);
+        if (!isRecord(record)) continue;
+        if (typeof record.id !== 'string' || record.id === '') continue;
+        const summary = summariseBook(record, coverRoute);
+        // 缓存有上限：书架上的书不会多到哪儿去，但缓存也不该一直长。
+        if (summaryCache.size >= SUMMARY_CACHE_LIMIT) {
+          const oldest = summaryCache.keys().next();
+          if (!oldest.done) summaryCache.delete(oldest.value);
+        }
+        summaryCache.set(name, { id: record.id, mtimeMs, size, summary });
+        summaries.push(summary);
+      }
+      summaries.sort((a, b) => {
+        const diff = (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0);
+        if (diff !== 0) return diff;
+        // 同一时间进来的书按 id 排，顺序才是稳定的。
+        return String(a.id) < String(b.id) ? -1 : (String(a.id) > String(b.id) ? 1 : 0);
+      });
+      return summaries;
+    },
+
+    /**
      * 读一本书。
      *
      * @param {string} id - 书的 id。
@@ -263,6 +581,41 @@ export function createShelf(options = {}) {
     },
 
     /**
+     * 读一本书的封面字节。
+     *
+     * 封面在记录里是 data URL，宿主没有画布，改不了图，只能把里面的字节
+     * 原样取出来。取一次就留着（按文件时间与大小认），别每来一个图片请求
+     * 就把整本书重新解析一遍。
+     *
+     * @param {string} id - 书的 id。
+     * @returns {Promise<{ bytes: Uint8Array, mime: string }|undefined>} 封面字节；没有封面时是 undefined。
+     */
+    async getCover(id) {
+      const key = typeof id === 'string' ? id : '';
+      if (key === '') return undefined;
+      const file = bookFile(key);
+      let info = null;
+      try {
+        info = statSync(file);
+      } catch {
+        return undefined;
+      }
+      const mtimeMs = Number(info.mtimeMs) || 0;
+      const size = Number(info.size) || 0;
+      const cached = coverCache.get(key);
+      if (cached !== undefined && cached.mtimeMs === mtimeMs && cached.size === size) {
+        return cached;
+      }
+      const record = readJson(file);
+      if (!isRecord(record)) return undefined;
+      const parsed = parseDataUrl(record.cover);
+      if (parsed === null) return undefined;
+      const entry = { mtimeMs, size, bytes: parsed.bytes, mime: parsed.mime };
+      coverCache.set(key, entry);
+      return entry;
+    },
+
+    /**
      * 写入或覆盖一本书。
      *
      * @param {object} book - 整条记录。
@@ -275,8 +628,110 @@ export function createShelf(options = {}) {
       if (id === '') return;
       const file = bookFile(id);
       await withFileLock(file, () => {
-        writeJsonAtomic(file, book);
+        // 客户端会把它手里的整条记录写回来，而那条记录往往没有 source 字段
+        // （它是在源文件保存之前读到的）。宿主不能因此把学习者的源文件信息弄丢：
+        // 记录里没有 source 时，磁盘上已有的那份保留下来。
+        const existing = readJson(file);
+        const known = isRecord(existing?.source) ? existing.source : null;
+        const merged = known !== null && !isRecord(book.source) ? { ...book, source: known } : book;
+        writeJsonAtomic(file, merged);
       });
+      // 书换了：摘要与封面都重新算。
+      dropCache(id);
+    },
+
+    /**
+     * 写入一本书的原始文件：导入时的那个 EPUB/PDF/TXT。
+     *
+     * 字节落在 `<dir>/sources/<bookId>.<format>`，元数据合并进那本书的记录，
+     * 于是书库里一眼就能看出这本书有没有源文件。
+     *
+     * @param {string} id - 书的 id。
+     * @param {object} source - 源文件。
+     * @param {string} [source.fileName] - 原始文件名。
+     * @param {string} [source.format] - 格式（epub、pdf、txt……）。
+     * @param {string} [source.contentType] - MIME 类型。
+     * @param {Uint8Array|Buffer} [source.bytes] - 文件的字节。
+     * @returns {Promise<object|undefined>} 存下来的元数据；没有字节时是 undefined。
+     */
+    async putSource(id, source) {
+      const key = typeof id === 'string' ? id : '';
+      if (key === '') return undefined;
+      const bytes = toBytes(source?.bytes);
+      if (bytes === null || bytes.length === 0) return undefined;
+      const format = safeFormat(source?.format);
+      const file = sourceFile(key, format);
+      await withFileLock(file, () => {
+        writeBytesAtomic(file, bytes);
+      });
+      // 换了格式的旧文件不要留在目录里：同一本书只保留一个源文件。
+      const prefix = `${safeFileName(key)}.`;
+      let names = [];
+      try {
+        names = readdirSync(sourcesDir);
+      } catch {
+        names = [];
+      }
+      for (const name of names) {
+        if (!name.startsWith(prefix)) continue;
+        if (join(sourcesDir, name) === file) continue;
+        try {
+          unlinkSync(join(sourcesDir, name));
+        } catch {
+          // 已经不在了。
+        }
+      }
+      const meta = {
+        fileName: typeof source?.fileName === 'string' ? source.fileName : '',
+        format,
+        contentType: typeof source?.contentType === 'string' ? source.contentType : '',
+        size: bytes.length,
+        storedAt: Date.now(),
+      };
+      // 元数据跟着书记录走：书库里一眼就能看出这本书有没有源文件。
+      const bookPath = bookFile(key);
+      await withFileLock(bookPath, () => {
+        const record = readJson(bookPath);
+        // 书可能还没写进来（客户端先传文件再存书）：这时只存文件，不报错。
+        if (!isRecord(record)) return;
+        writeJsonAtomic(bookPath, { ...record, source: meta });
+      });
+      return meta;
+    },
+
+    /**
+     * 读一本书的源文件元数据。
+     *
+     * @param {string} id - 书的 id。
+     * @returns {Promise<object|undefined>} 元数据；没有源文件时是 undefined。
+     */
+    async getSourceMeta(id) {
+      const key = typeof id === 'string' ? id : '';
+      if (key === '') return undefined;
+      const record = readJson(bookFile(key));
+      return readSourceMeta(key, isRecord(record) ? record : null);
+    },
+
+    /**
+     * 读一本书的源文件。
+     *
+     * @param {string} id - 书的 id。
+     * @returns {Promise<{ meta: object, bytes: Uint8Array }|undefined>} 源文件；没有时是 undefined。
+     */
+    async getSource(id) {
+      const key = typeof id === 'string' ? id : '';
+      if (key === '') return undefined;
+      const record = readJson(bookFile(key));
+      const meta = readSourceMeta(key, isRecord(record) ? record : null);
+      if (meta === undefined) return undefined;
+      const file = findSourceFile(key, isRecord(record) ? record : null);
+      if (file === undefined) return undefined;
+      try {
+        return { meta, bytes: new Uint8Array(readFileSync(file)) };
+      } catch {
+        // 文件读不出来：当作没有源文件。
+        return undefined;
+      }
     },
 
     /**
@@ -302,10 +757,39 @@ export function createShelf(options = {}) {
           progress: { ...old, ...patch, updatedAt: Date.now() },
         });
       });
+      // 进度是摘要的一部分：摘要要重新算（封面的字节没动，留着）。
+      summaryCache.delete(`${safeFileName(key)}.json`);
     },
 
     /**
-     * 删除一本书。
+     * 合并并写回一本书的封面。
+     *
+     * 和 `updateProgress` 一样：读改写都在磁盘上完成，客户端只传封面。
+     * 记录里的其它东西——正文、进度、源文件——原样留着，所以正在读的那本书
+     * 不会因为换了一张封面而丢掉阅读进度。宿主没有画布，改不了图片，
+     * 客户端传进来的是什么就存什么。
+     *
+     * @param {string} id - 书的 id。
+     * @param {string} cover - 新的封面（data URL）。
+     * @returns {Promise<void>}
+     */
+    async updateCover(id, cover) {
+      const key = typeof id === 'string' ? id : '';
+      if (key === '') return;
+      if (typeof cover !== 'string' || cover === '') return;
+      const file = bookFile(key);
+      await withFileLock(file, () => {
+        const record = readJson(file);
+        // 书可能刚被删掉：这时不报错，也不凭空造一本书出来。
+        if (!isRecord(record)) return;
+        writeJsonAtomic(file, { ...record, cover });
+      });
+      // 封面换了：摘要（地址里的哈希与大小）与封面字节都要重新算。
+      dropCache(key);
+    },
+
+    /**
+     * 删除一本书，连同它的源文件。
      *
      * @param {string} id - 书的 id。
      * @returns {Promise<void>}
@@ -321,6 +805,24 @@ export function createShelf(options = {}) {
           // 已经不在了。
         }
       });
+      // 书没了：摘要与封面的缓存都丢掉。
+      dropCache(key);
+      // 源文件跟着书一起走：书删了，文件也不该留在磁盘上。
+      const prefix = `${safeFileName(key)}.`;
+      let names = [];
+      try {
+        names = readdirSync(sourcesDir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (!name.startsWith(prefix)) continue;
+        try {
+          unlinkSync(join(sourcesDir, name));
+        } catch {
+          // 已经不在了。
+        }
+      }
     },
 
     /**

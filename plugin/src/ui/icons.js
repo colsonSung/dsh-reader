@@ -296,6 +296,60 @@ export function GlobeIcon(props) {
   });
 }
 
+/** Two sheets: copy. */
+export function CopyIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('rect', { key: 'a', x: '5.6', y: '5.6', width: '8', height: '8', rx: '1.6' }),
+      h('path', { key: 'b', d: 'M10.4 5.6V3.8a1.6 1.6 0 0 0-1.6-1.6H3.8a1.6 1.6 0 0 0-1.6 1.6v5a1.6 1.6 0 0 0 1.6 1.6h1.8' }),
+    ],
+  });
+}
+
+/** A cross: close. */
+export function CloseIcon(props) {
+  return glyph({
+    ...props,
+    children: [h('path', { key: 'a', d: 'M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6' })],
+  });
+}
+
+/** Four squares: the grid view. */
+export function GridIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('rect', { key: 'a', x: '2.6', y: '2.6', width: '4.8', height: '4.8', rx: '1' }),
+      h('rect', { key: 'b', x: '8.6', y: '2.6', width: '4.8', height: '4.8', rx: '1' }),
+      h('rect', { key: 'c', x: '2.6', y: '8.6', width: '4.8', height: '4.8', rx: '1' }),
+      h('rect', { key: 'd', x: '8.6', y: '8.6', width: '4.8', height: '4.8', rx: '1' }),
+    ],
+  });
+}
+
+/**
+ * A star: the vocabulary mark.
+ *
+ * The outline is the empty state and the filled one the saved state, so the
+ * two are told apart by the shape and not by the colour alone.
+ *
+ * @param {{ filled?: boolean }} props
+ * @returns {any} the element tree
+ */
+export function StarIcon({ filled = false, ...props }) {
+  return glyph({
+    ...props,
+    children: [
+      h('path', {
+        key: 'a',
+        d: 'M8 2.3l1.72 3.49 3.85.56-2.79 2.72.66 3.84L8 11.15l-3.44 1.76.66-3.84L2.43 6.35l3.85-.56z',
+        ...(filled === true ? { fill: 'currentColor', stroke: 'none' } : {}),
+      }),
+    ],
+  });
+}
+
 /** A note: a page with lines on it. */
 export function NoteIcon(props) {
   return glyph({

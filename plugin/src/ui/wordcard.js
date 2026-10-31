@@ -11,6 +11,7 @@ import { speakWord } from '../lib/speech.js';
 import { createElement as h, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { askAi } from '../lib/ai.js';
+import { CloseIcon, CopyIcon, SoundIcon, StarIcon } from './icons.js';
 
 const CARD_WIDTH = 340;
 
@@ -101,7 +102,7 @@ export function WordCard({ t, word, sentence, position, entry, onClose, onSave, 
       h(
         'div',
         { className: 'er-wordcard-actions' },
-        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.speakWord'), onClick: () => { speak(word); } }, '🔊'),
+        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.speakWord'), onClick: () => { speak(word); } }, h(SoundIcon, { size: 15 })),
         h(
           'button',
           {
@@ -118,10 +119,10 @@ export function WordCard({ t, word, sentence, position, entry, onClose, onSave, 
               }
             },
           },
-          saved ? '★' : '☆',
+          h(StarIcon, { size: 15, filled: saved }),
         ),
-        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.copyWord'), onClick: () => { void navigator.clipboard?.writeText(word); } }, '⧉'),
-        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.close'), onClick: onClose }, '✕'),
+        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.copyWord'), onClick: () => { void navigator.clipboard?.writeText(word); } }, h(CopyIcon, { size: 15 })),
+        h('button', { type: 'button', className: 'er-wordcard-icon', title: t('reader.close'), onClick: onClose }, h(CloseIcon, { size: 14 })),
       ),
     ),
     data?.phonetic ? h('div', { className: 'er-wordcard-phonetic' }, data.phonetic) : null,

@@ -29,78 +29,78 @@ const RATES = [0.75, 1, 1.25, 1.5, 2];
 /** The styles of the podcast view; host theme tokens only. */
 const PODCAST_STYLE = `
 .er-pod{display:flex;flex-direction:column;gap:12px;min-width:0}
-.er-pod-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:var(--dsw-radius-lg,12px);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
+.er-pod-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:var(--dsw-radius-md);background:var(--er-surface-2);border:1px solid var(--er-line)}
 .er-pod-head-label{font-size:12px;color:var(--dsw-alias-label-tertiary);flex:none}
 .er-pod-head-scope{flex:1;min-width:0;font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* The scope picker reuses the plugin's own select, so it looks like every
    other dropdown of the reader. */
 .er-pod-head .er-pod-scope-select{flex:1;min-width:0;max-width:280px}
 .er-pod-head-actions{display:flex;align-items:center;gap:8px;flex:none}
-.er-pod-generate{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:var(--dsw-radius-md,8px);border:1px solid var(--dsw-alias-state-business-primary);background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-bg-base);font:inherit;font-size:12px;cursor:pointer}
+.er-pod-generate{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-accent);background:var(--er-accent);color:var(--er-on-accent);font:inherit;font-size:12px;cursor:pointer}
 .er-pod-generate:hover:not(:disabled){filter:brightness(.94)}
-.er-pod-generate:disabled{cursor:default;background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-tertiary);filter:none}
-.er-pod-generate:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
+.er-pod-generate:disabled{cursor:default;background:var(--er-surface-1);border-color:var(--er-line);color:var(--dsw-alias-label-tertiary);filter:none}
+.er-pod-generate:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--er-accent));outline-offset:1px}
 .er-pod-generating{display:inline-flex;align-items:center;gap:7px}
-.er-pod-spinner{width:11px;height:11px;flex:none;border-radius:50%;border:1.5px solid var(--dsw-alias-state-business-primary);border-top-color:transparent;animation:er-pod-spin .8s linear infinite}
+.er-pod-spinner{width:11px;height:11px;flex:none;border-radius:50%;border:1.5px solid var(--er-accent);border-top-color:transparent;animation:er-pod-spin .8s linear infinite}
 @keyframes er-pod-spin{to{transform:rotate(360deg)}}
-.er-pod-error{display:inline-flex;align-self:flex-start;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-state-error-primary);font-size:11.5px;line-height:1.4}
+.er-pod-error{display:inline-flex;align-self:flex-start;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:var(--er-surface-2);border:1px solid var(--er-line);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.4}
 .er-pod-error::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .er-pod-body{display:grid;grid-template-columns:minmax(210px,300px) 1fr;gap:14px;align-items:start;min-width:0}
 .er-pod-column{display:flex;flex-direction:column;gap:8px;min-width:0}
 .er-pod-column-title{font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .er-pod-list{display:flex;flex-direction:column;gap:8px;max-height:44vh;overflow:auto;padding-right:2px}
-.er-pod-episode{display:flex;align-items:flex-start;gap:8px;padding:10px 11px;border-radius:var(--dsw-radius-md,8px);border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);cursor:pointer}
+.er-pod-episode{display:flex;align-items:flex-start;gap:8px;padding:10px 11px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background:var(--er-surface-1);cursor:pointer}
 .er-pod-episode:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.er-pod-episode.is-active{border-color:var(--dsw-alias-state-business-primary);background:var(--dsw-alias-bg-layer-2)}
+.er-pod-episode.is-active{border-color:var(--er-accent);background:var(--er-surface-2)}
 .er-pod-episode-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
 .er-pod-episode-title{font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.er-pod-episode-scope{font-size:11px;color:var(--dsw-alias-state-business-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.er-pod-episode-summary{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.er-pod-episode-date{font-size:11px;color:var(--dsw-alias-label-tertiary)}
-.er-pod-episode-delete{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--dsw-radius-sm,6px);border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
+.er-pod-episode-scope{font-size:12px;color:var(--er-accent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.er-pod-episode-summary{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.er-pod-episode-date{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.er-pod-episode-delete{flex:none;display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;border-radius:var(--dsw-radius-xs);border:1px solid transparent;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer}
 .er-pod-episode-delete:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-state-error-primary)}
 .er-pod-transcript{display:flex;flex-direction:column;gap:8px;min-width:0}
 .er-pod-lines{display:flex;flex-direction:column;gap:6px;max-height:36vh;overflow:auto;padding-right:2px}
-.er-pod-line{display:flex;gap:10px;padding:7px 9px;border-radius:var(--dsw-radius-md,8px);border:1px solid transparent;cursor:pointer}
+.er-pod-line{display:flex;gap:10px;padding:7px 9px;border-radius:var(--dsw-radius-sm);border:1px solid transparent;cursor:pointer}
 .er-pod-line:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.er-pod-line.is-current{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-state-business-primary);box-shadow:var(--dsw-elevation-prominent)}
-.er-pod-line-speaker{flex:none;width:48px;padding-top:2px;font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.er-pod-line-speaker.is-host{color:var(--dsw-alias-state-business-primary)}
+.er-pod-line.is-current{background:var(--er-surface-2);border-color:var(--er-accent);box-shadow:var(--er-shadow-card)}
+.er-pod-line-speaker{flex:none;width:48px;padding-top:2px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.er-pod-line-speaker.is-host{color:var(--er-accent)}
 .er-pod-line-speaker.is-guest{color:var(--dsw-alias-state-success-primary)}
 .er-pod-line-speaker.is-you{color:var(--dsw-alias-state-warn-primary)}
 .er-pod-line-text{flex:1;min-width:0;font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary)}
-.er-pod-player{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;border-radius:var(--dsw-radius-lg,12px);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1)}
-.er-pod-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:var(--dsw-radius-md,8px);border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
+.er-pod-player{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 12px;border-radius:var(--dsw-radius-md);background:var(--er-surface-2);border:1px solid var(--er-line)}
+.er-pod-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background:var(--er-surface-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
 .er-pod-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .er-pod-btn:disabled{cursor:default;color:var(--dsw-alias-label-tertiary)}
-.er-pod-btn-play{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-bg-base)}
+.er-pod-btn-play{background:var(--er-accent);border-color:var(--er-accent);color:var(--er-on-accent)}
 .er-pod-btn-play:hover:not(:disabled){filter:brightness(.94)}
-.er-pod-btn-play:disabled{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-tertiary);filter:none}
+.er-pod-btn-play:disabled{background:var(--er-surface-1);border-color:var(--er-line);color:var(--dsw-alias-label-tertiary);filter:none}
 /* The microphone turns red and pulses while the learner is talking. */
-.er-pod-mic.is-recording{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);color:var(--dsw-alias-bg-base);animation:er-pod-pulse 1.2s ease-in-out infinite}
+.er-pod-mic.is-recording{background:var(--dsw-alias-state-error-primary);border-color:var(--dsw-alias-state-error-primary);color:var(--er-on-accent);animation:er-pod-pulse 1.2s ease-in-out infinite}
 .er-pod-mic.is-recording:hover:not(:disabled){filter:brightness(.94)}
 @keyframes er-pod-pulse{0%,100%{box-shadow:0 0 0 0 var(--dsw-alias-state-error-primary)}50%{box-shadow:0 0 0 6px transparent}}
 .er-pod-rate{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.er-pod-rate-select{appearance:none;-webkit-appearance:none;padding:5px 24px 5px 9px;border-radius:var(--dsw-radius-md,8px);border:1px solid var(--dsw-alias-border-l1);background-color:var(--dsw-alias-bg-layer-1);background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 13px) 52%,calc(100% - 8px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
+.er-pod-rate-select{appearance:none;-webkit-appearance:none;padding:5px 24px 5px 9px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background-color:var(--er-surface-1);background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 13px) 52%,calc(100% - 8px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;cursor:pointer}
 .er-pod-counter{margin-left:auto;font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.er-pod-empty{padding:18px 12px;border-radius:var(--dsw-radius-md,8px);border:1px dashed var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary);font-size:12px;text-align:center}
+.er-pod-empty{padding:18px 12px;border-radius:var(--dsw-radius-sm);border:1px dashed var(--er-line-strong);color:var(--dsw-alias-label-tertiary);font-size:12px;text-align:center}
 /* The two voices of the show, under the episode list. */
-.er-pod-voices{display:flex;flex-direction:column;gap:8px;margin-top:2px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l1)}
+.er-pod-voices{display:flex;flex-direction:column;gap:8px;margin-top:2px;padding-top:10px;border-top:1px solid var(--er-line)}
 .er-pod-voice{display:flex;flex-direction:column;gap:4px}
-.er-pod-voice-label{font-size:11px;color:var(--dsw-alias-label-tertiary)}
+.er-pod-voice-label{font-size:12px;color:var(--dsw-alias-label-tertiary)}
 .er-pod-voice .er-pod-voice-select{width:100%;max-width:none}
 /* Talking into the episode: the input box and the note that replaces the
    microphone when the window cannot record. */
 .er-pod-talk{display:flex;flex-direction:column;gap:6px}
-.er-pod-talk-note{display:inline-flex;align-self:flex-start;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l1);color:var(--dsw-alias-state-warn-primary);font-size:11.5px;line-height:1.4}
+.er-pod-talk-note{display:inline-flex;align-self:flex-start;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;background:var(--er-surface-2);border:1px solid var(--er-line);color:var(--dsw-alias-state-warn-primary);font-size:12px;line-height:1.4}
 .er-pod-talk-note::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor;flex:none}
 .er-pod-talk-row{display:flex;align-items:center;gap:8px}
-.er-pod-talk-input{flex:1;min-width:0;padding:6px 10px;border-radius:var(--dsw-radius-md,8px);border:1px solid var(--dsw-alias-border-l1);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
+.er-pod-talk-input{flex:1;min-width:0;padding:6px 10px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background:var(--er-surface-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px}
 .er-pod-talk-input::placeholder{color:var(--dsw-alias-label-tertiary)}
-.er-pod-talk-input:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px}
-.er-pod-talk-send{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-bg-base)}
+.er-pod-talk-input:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--er-accent));outline-offset:1px}
+.er-pod-talk-send{background:var(--er-accent);border-color:var(--er-accent);color:var(--er-on-accent)}
 .er-pod-talk-send:hover:not(:disabled){filter:brightness(.94)}
-.er-pod-talk-send:disabled{background:var(--dsw-alias-bg-layer-1);border-color:var(--dsw-alias-border-l1);color:var(--dsw-alias-label-tertiary);filter:none}
+.er-pod-talk-send:disabled{background:var(--er-surface-1);border-color:var(--er-line);color:var(--dsw-alias-label-tertiary);filter:none}
 @media (max-width:760px){.er-pod-body{grid-template-columns:1fr}.er-pod-counter{margin-left:0}}
 `;
 

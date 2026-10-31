@@ -19,7 +19,7 @@ import {
   normalizeText,
   splitSentences,
   tokenize,
-} from '../src/lib/engine/segment.js';
+} from '../src/shared/segment.js';
 import { diffTyping, diffWords, wordsPerMinute } from '../src/lib/engine/match.js';
 import { createTts } from '../src/lib/engine/tts.js';
 import { createSyncDriver } from '../src/lib/engine/sync.js';

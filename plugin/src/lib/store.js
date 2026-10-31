@@ -12,6 +12,7 @@
  */
 
 import { callShelf, SHELF_UNAVAILABLE } from './remote.js';
+import { bookWordCount } from '../shared/word-count.js';
 import {
   BOOKS_STORE_NAME,
   NOTES_STORE_NAME,
@@ -48,14 +49,6 @@ import {
  */
 const COLLECTIONS = [
   {
-    key: 'books',
-    list: 'books.list',
-    put: 'books.put',
-    payloadKey: 'book',
-    local: listLocalBooks,
-    storeName: BOOKS_STORE_NAME,
-  },
-  {
     key: 'vocab',
     list: 'vocab.list',
     put: 'vocab.put',
@@ -79,6 +72,17 @@ const COLLECTIONS = [
     local: listLocalPodcasts,
     storeName: PODCAST_STORE_NAME,
   },
+  {
+    key: 'books',
+    list: 'books.list',
+    // The migration only counts the records, so the cheap list is enough:
+    // the whole records of six books are three megabytes.
+    count: 'books.summaries',
+    put: 'books.put',
+    payloadKey: 'book',
+    local: listLocalBooks,
+    storeName: BOOKS_STORE_NAME,
+  },
 ];
 
 /** Where the migration marker lives; it is per origin, like the shelf was. */
@@ -93,6 +97,17 @@ const MIGRATION_KEY = 'english-reader:shelf-migrated';
  * Host either has a shelf or it does not.
  */
 let hostShelfAvailable = true;
+
+/**
+ * Whether the Host knows the summary action.
+ *
+ * An application that has not been restarted yet answers
+ * `reader/unknown-action` for `books.summaries`. The page then asks for the
+ * whole shelf and builds the summaries itself. The Host still has a shelf, so
+ * this is not the same as "the Host has no shelf" — and the page stops asking
+ * for summaries, so the extra round trip is paid once.
+ */
+let hostSummariesAvailable = true;
 
 /**
  * Whether the Host's shelf may be used.
@@ -125,6 +140,62 @@ export function noteHostShelfUnavailable() {
  */
 function isUnavailable(error) {
   return error?.code === SHELF_UNAVAILABLE;
+}
+
+/**
+ * Whether an error says that the Host does not know the action.
+ *
+ * The Host answered, and it has a shelf — it just does not know this one
+ * action yet. The page has another way to get the same thing.
+ *
+ * @param {unknown} error - the error.
+ * @returns {boolean}
+ */
+function isUnknownAction(error) {
+  return error?.unknownAction === true;
+}
+
+/**
+ * Whether a value is a record.
+ * @param {unknown} value - the value.
+ * @returns {boolean}
+ */
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * The summary of one book, built from its whole record.
+ *
+ * This is the shape the Host answers with; the page builds it itself when the
+ * Host is too old to know `books.summaries`. The word count comes from the
+ * same counter the Host uses (`src/shared/word-count.js`), so the number in
+ * the shelf is the same either way.
+ *
+ * @param {object} book - the whole record.
+ * @returns {object} the summary.
+ */
+function summariseBook(book) {
+  const chapters = Array.isArray(book?.chapters) ? book.chapters : [];
+  let paragraphs = 0;
+  for (const chapter of chapters) {
+    if (Array.isArray(chapter?.paragraphs)) paragraphs += chapter.paragraphs.length;
+  }
+  return {
+    id: String(book?.id ?? ''),
+    title: typeof book?.title === 'string' ? book.title : '',
+    author: typeof book?.author === 'string' ? book.author : '',
+    format: typeof book?.format === 'string' ? book.format : '',
+    addedAt: Number(book?.addedAt) || 0,
+    progress: isRecord(book?.progress) ? book.progress : {},
+    source: isRecord(book?.source) ? book.source : undefined,
+    // The Host answers with the address of the picture; the browser's own
+    // shelf keeps the picture in the record itself.
+    cover: typeof book?.cover === 'string' ? book.cover : '',
+    wordCount: bookWordCount(chapters),
+    chapterCount: chapters.length,
+    paragraphCount: paragraphs,
+  };
 }
 
 /**
@@ -163,6 +234,33 @@ function writeMigrationMarker(marker) {
 }
 
 /**
+ * Ask the Host for the records of a collection.
+ *
+ * The cheap list (`collection.count`) is enough when the caller only counts
+ * them: the whole records of six books are three megabytes, the summaries
+ * three kilobytes. A Host that does not know the cheap list — one that has
+ * not been restarted since the page was rebuilt — is asked for the whole
+ * collection instead.
+ *
+ * @param {object} collection - the collection.
+ * @returns {Promise<object[]>} the records.
+ */
+async function listHostRecords(collection) {
+  const cheap = collection.count ?? collection.list;
+  try {
+    const records = await callShelf(cheap);
+    return Array.isArray(records) ? records : [];
+  } catch (error) {
+    if (cheap === collection.list) throw error;
+    // The cheap list did not work out. The whole collection is the
+    // fallback — and a Host that cannot be reached at all fails here too,
+    // which the caller handles.
+    const records = await callShelf(collection.list);
+    return Array.isArray(records) ? records : [];
+  }
+}
+
+/**
  * Push the books of the browser up to the Host.
  *
  * The Host is the truth. A collection is only handed over when the Host has
@@ -181,9 +279,12 @@ async function migrateToHost() {
   for (const collection of COLLECTIONS) {
     if (marker[collection.key] === true) continue;
 
+    // The Host is asked first: it is the truth, and a Host that cannot be
+    // reached ends the migration right here — before the books, whose list
+    // is the big one, are asked for.
     let hostRecords;
     try {
-      hostRecords = await callShelf(collection.list);
+      hostRecords = await listHostRecords(collection);
     } catch (error) {
       // The Host cannot be reached: try again the next time the page runs.
       if (isUnavailable(error)) {
@@ -193,7 +294,8 @@ async function migrateToHost() {
       continue;
     }
 
-    const hostCount = Array.isArray(hostRecords) ? hostRecords.length : 0;
+    const hostCount = hostRecords.length;
+
     let localRecords = [];
     try {
       localRecords = (await collection.local()) ?? [];
@@ -267,6 +369,42 @@ export async function listBooks() {
 }
 
 /**
+ * Every book as a summary, newest first.
+ *
+ * The summary is what the shelf actually shows: the name, the author, the
+ * progress, the word count and the cover — without the text of the book. A
+ * whole shelf of six books is 3.37 MB; the summaries are a few kilobytes.
+ *
+ * A Host that does not know `books.summaries` yet (the application has not
+ * been restarted since the page was rebuilt) is asked for the whole shelf
+ * instead, and the summaries are built here. The word count comes from the
+ * same counter the Host uses, so the number is the same either way.
+ *
+ * @returns {Promise<object[]>} the summaries.
+ */
+export async function listBookSummaries() {
+  await shelfReady();
+  if (hostShelfAvailable && hostSummariesAvailable) {
+    try {
+      const summaries = await callShelf('books.summaries');
+      return (Array.isArray(summaries) ? summaries : [])
+        .sort((a, b) => (b?.addedAt ?? 0) - (a?.addedAt ?? 0));
+    } catch (error) {
+      if (isUnknownAction(error)) {
+        // The Host is too old for the summaries — it still has the shelf, so
+        // the whole shelf is asked for below. It is not asked again.
+        hostSummariesAvailable = false;
+      }
+      // Any other failure: the whole shelf is the fallback below. A Host
+      // that cannot be reached at all is the local shelf's business, and
+      // listBooks() is what sorts that out.
+    }
+  }
+  const books = await listBooks();
+  return books.map(summariseBook);
+}
+
+/**
  * Read one book.
  * @param {string} id
  * @returns {Promise<BookRecord|undefined>}
@@ -329,6 +467,42 @@ export async function updateProgress(id, progress) {
   const book = await getLocalBook(id);
   if (book === undefined) return;
   await saveLocalBook({ ...book, progress: { ...book.progress, ...progress, updatedAt: Date.now() } });
+}
+
+/**
+ * Store a new cover for a book.
+ *
+ * The Host has a dedicated action for this: the cover is a picture of a few
+ * kilobytes, while the book itself is megabytes, and only the picture has to
+ * travel. The Host merges it into the record, so the text, the progress and
+ * the source file stay as they are — the reading position of a book that is
+ * being read is never lost to a picture.
+ *
+ * A Host that does not know the action yet (the application has not been
+ * restarted since the page was rebuilt) is asked for the whole book instead.
+ *
+ * @param {string} id - the book.
+ * @param {string} cover - the new cover, as a data URL.
+ * @returns {Promise<void>}
+ */
+export async function saveBookCover(id, cover) {
+  if (hostShelfAvailable) {
+    try {
+      await callShelf('books.cover', { id, cover });
+      return;
+    } catch (error) {
+      if (isUnknownAction(error)) {
+        // An older Host: the whole record travels instead. The Host still
+        // has the shelf, so it is not gone.
+      } else {
+        if (!isUnavailable(error)) throw error;
+        noteHostShelfUnavailable();
+      }
+    }
+  }
+  const book = await getBook(id);
+  if (book === undefined) return;
+  await saveBook({ ...book, cover });
 }
 
 /**

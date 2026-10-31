@@ -34,7 +34,7 @@ import { NotesPanel } from './notes.js';
 import { MindMapView } from './mindmap.js';
 import { PodcastView } from './podcast.js';
 import {
-  ClozeIcon, ExitIcon, GlobeIcon, HighlighterIcon, KeyboardIcon, ListIcon, MicIcon, MindMapIcon,
+  ClozeIcon, CloseIcon, ExitIcon, GlobeIcon, HighlighterIcon, KeyboardIcon, ListIcon, MicIcon, MindMapIcon,
   NextIcon, NoteIcon, PauseIcon, PencilIcon, PlayIcon, PodcastIcon, PrevIcon, RepeatIcon,
   SettingsIcon, SoundIcon, TrashIcon, TranslateIcon,
 } from './icons.js';
@@ -92,7 +92,10 @@ const DEFAULT_TYPING_SETTINGS = {
 /** How wide the reading column may grow, in characters per line. */
 const COLUMN_WIDTHS = {
   narrow: '62ch',
-  normal: '74ch',
+  // The default measure: a line of 60 to 70 characters is the one the eye
+  // can follow without losing its place. The wider presets stay for the
+  // learner who wants them.
+  normal: '68ch',
   wide: '92ch',
   // Fill the reading area. The lines get long, which is a trade the learner
   // makes on purpose.
@@ -475,8 +478,10 @@ export function ReaderView({
   const cloudVoicesRef = useRef([]);
   const ttsRef = useRef(null);
   // The language of the book: an English voice cannot read a Chinese book
-  // aloud, and an English recogniser cannot hear one.
-  const language = useMemo(() => detectBookLanguage(book?.chapters), [book]);
+  // aloud, and an English recogniser cannot hear one. The units carry the
+  // same characters as the chapters (the shelf list has no text), so the
+  // book is read from them.
+  const language = useMemo(() => detectBookLanguage(units), [units]);
   if (ttsRef.current === null) {
     ttsRef.current = createTts({
       // 云端音色走宿主的 MiniMax 语音合成；失败时引擎自动回落到本机合成
@@ -704,6 +709,13 @@ export function ReaderView({
     onActivity?.(recordReading(book?.progress?.activity, { ms: delta.ms, words }), playedMs);
   }, [book, wordsUpTo, onActivity]);
 
+  // The flush callback is rebuilt on every sentence the learner turns — it
+  // reads the position — so the effects below must not depend on it: they
+  // would fire again and again for the same sentence, and the progress would
+  // be written twice. They read the newest callback through this ref.
+  const flushRef = useRef(flushActivity);
+  useEffect(() => { flushRef.current = flushActivity; }, [flushActivity]);
+
   useEffect(() => {
     if (book === null || book === undefined) return undefined;
     const timer = setInterval(() => {
@@ -711,16 +723,21 @@ export function ReaderView({
       activityRef.current.ms += 1000;
     }, 1000);
     // The activity is written back while reading, not only when leaving.
-    const flusher = setInterval(() => { flushActivity(); }, 15000);
+    const flusher = setInterval(() => { flushRef.current(); }, 15000);
     return () => {
       clearInterval(timer);
       clearInterval(flusher);
-      flushActivity();
+      // Leaving the book (or opening another one): what was read is written
+      // back one last time.
+      flushRef.current();
     };
-  }, [book, flushActivity]);
+    // The book is named by its id, not by the object: the shelf patches the
+    // book's progress on every sentence, and a new object would tear the
+    // timer down and write the progress again — for nothing.
+  }, [book?.id]);
 
-  // Moving to another sentence counts the words just read.
-  useEffect(() => { flushActivity(); }, [index, flushActivity]);
+  // Moving to another sentence counts the words just read — once.
+  useEffect(() => { flushRef.current(); }, [index]);
 
   // The vocabulary list can ask the reader to open a word card.
   useEffect(() => {
@@ -748,6 +765,12 @@ export function ReaderView({
   const currentParagraphIndex = paragraphIndexByUnit.get(index) ?? 0;
   const currentParagraph = paragraphs[currentParagraphIndex];
   const currentParagraphFirstUnit = currentParagraph?.unitIndexes?.[0] ?? -1;
+
+  // How far through the book the reader is. The brass rail on the left edge
+  // of the page fills with it, so the page shows its own place in the book.
+  const readingProgress = paragraphs.length === 0
+    ? 0
+    : Math.round((currentParagraphIndex / Math.max(1, paragraphs.length - 1)) * 100);
 
   // Keep the active paragraph in view when the reader moves on.
   useEffect(() => {
@@ -1480,9 +1503,9 @@ export function ReaderView({
     if (playedRef.current.since !== 0) {
       playedRef.current.ms += Date.now() - playedRef.current.since;
       playedRef.current.since = 0;
-      flushActivity();
+      flushRef.current();
     }
-  }, [tts, flushActivity]);
+  }, [tts]);
 
   const playActive = useCallback(() => {
     if (unit === undefined) return;
@@ -2397,7 +2420,7 @@ export function ReaderView({
             'aria-label': t('notes.close'),
             onClick: () => { setNoteEditor(null); },
           },
-          '✕',
+          h(CloseIcon, { size: 14 }),
         ),
       ),
       h('div', { className: 'er-note-editor-quote' }, `“${noteEditor.quote}”`),
@@ -2719,6 +2742,7 @@ export function ReaderView({
               lineHeight: String(1.2 + settings.lineHeight),
               '--er-text-size': `${settings.fontSize}px`,
               '--er-column-width': COLUMN_WIDTHS[settings.columnWidth] ?? COLUMN_WIDTHS.normal,
+              '--er-progress': `${readingProgress}%`,
             },
           },
           // The hint belongs to the page: it sits at the top of the card, so

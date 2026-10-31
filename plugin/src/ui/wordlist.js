@@ -11,7 +11,7 @@
  * locale files are complete.
  */
 import { createElement as h, useCallback, useEffect, useMemo, useState } from 'react';
-import { SearchIcon, SoundIcon, TrashIcon } from './icons.js';
+import { CloseIcon, SearchIcon, SoundIcon, TrashIcon } from './icons.js';
 import { dueEntries, listEntries, removeEntry, summarize, VOCAB_CHANGED_EVENT } from '../lib/vocab.js';
 import { speakWord } from '../lib/speech.js';
 
@@ -287,7 +287,13 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
       h(
         'div',
         { className: 'er-wordlist-head' },
-        h('div', { className: 'er-wordlist-title' }, label(t, 'vocab.title', '生词本')),
+        // The page variant sits under a tab bar that already says
+        // "Vocabulary", so a heading there would only repeat it. The drawer
+        // floats over the reader and has no such signpost, so it keeps its
+        // title.
+        variant === 'page'
+          ? null
+          : h('div', { className: 'er-wordlist-title' }, label(t, 'vocab.title', '生词本')),
         h(
           'button',
           {
@@ -297,7 +303,7 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
             'aria-label': label(t, 'vocab.close', '关闭'),
             onClick: () => { onClose?.(); },
           },
-          '×',
+          h(CloseIcon, { size: 15 }),
         ),
       ),
       h(

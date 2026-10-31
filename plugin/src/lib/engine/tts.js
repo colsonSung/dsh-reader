@@ -15,7 +15,7 @@
  *     否则会拿英文音色读中文，听不懂
  */
 
-import { tokenize } from './segment.js';
+import { tokenize } from '../../shared/segment.js';
 import { speechLang, voiceMatchesLanguage } from '../language.js';
 
 /**

@@ -35,6 +35,32 @@ import { createShelf } from './src/host/shelf.js';
 /** The route the client half posts its requests to. */
 export const ROUTE = '/api/reader';
 
+/**
+ * The route the source files travel on.
+ *
+ * The body of a request is the file itself and the answer is the file itself:
+ * a book can be tens of megabytes, and base64 in a JSON envelope would make it
+ * a third bigger for nothing. What is known about the file (its name, its type,
+ * its format) travels in the query string, because a header cannot carry a
+ * file name with Chinese characters in it.
+ */
+export const SOURCE_ROUTE = '/api/reader/source';
+
+/**
+ * The route the cover images travel on.
+ *
+ * A cover is a picture, not a record: it does not belong inside the shelf
+ * JSON. Six books with their covers inlined are 1.86 MB of base64 that the
+ * shelf list does not need — the grid draws the cover at ~168 px, so the
+ * bytes go on their own request, the way the source files do, and the browser
+ * keeps them in its image cache.
+ *
+ * The address carries a `v` parameter: the hash of the cover itself. A new
+ * cover is a new address (the browser must not show the old picture), while a
+ * new reading progress is not (the picture must not be downloaded again).
+ */
+export const COVER_ROUTE = '/api/reader/cover';
+
 /** The methods the client half may ask for. */
 const METHODS = new Set(['word', 'translate', 'breakdown', 'mindmap', 'podcast', 'podcastReply', 'tts', 'asr', 'cover', 'voices', 'status', 'source', 'shelf']);
 
@@ -67,7 +93,8 @@ function shelfOptions(ctx) {
   const profileContext = serviceOf(ctx, 'profileContext');
   const profileDir = typeof profileContext?.dir === 'string' ? profileContext.dir : '';
   const dir = profileDir !== '' ? join(profileDir, 'reader') : undefined;
-  return { dir };
+  // 封面走自己的图片路由，摘要里放的是地址。
+  return { dir, coverRoute: COVER_ROUTE };
 }
 
 /**
@@ -85,6 +112,12 @@ async function handleShelf(shelf, payload) {
   if (action === 'books.list') {
     return Response.json({ ok: true, result: await shelf.listBooks() });
   }
+  if (action === 'books.summaries') {
+    // The shelf list: the same books, without the text and without the cover
+    // bytes. Six books are 3.37 MB as whole records and a few kilobytes as
+    // summaries.
+    return Response.json({ ok: true, result: await shelf.listBookSummaries() });
+  }
   if (action === 'books.get') {
     const book = await shelf.getBook(payload?.id);
     return Response.json({ ok: true, result: book ?? null });
@@ -99,6 +132,14 @@ async function handleShelf(shelf, payload) {
     // does not travel over the wire on every sentence.
     const id = typeof payload?.id === 'string' ? payload.id : '';
     await shelf.updateProgress(id, payload?.progress);
+    return Response.json({ ok: true, result: { id } });
+  }
+  if (action === 'books.cover') {
+    // The Host merges the new cover into the book on disk: the text, the
+    // progress and the source file stay as they are. Only the picture
+    // travels, not the whole book.
+    const id = typeof payload?.id === 'string' ? payload.id : '';
+    await shelf.updateCover(id, payload?.cover);
     return Response.json({ ok: true, result: { id } });
   }
   if (action === 'books.delete') {
@@ -149,6 +190,25 @@ async function handleShelf(shelf, payload) {
 }
 
 /**
+ * The name a download is offered under.
+ *
+ * The `Content-Disposition` header may only carry a plain name; the real name
+ * travels in `filename*` (RFC 5987) and in `x-reader-file-name`, which the
+ * client decodes itself.
+ *
+ * @param {string} fileName - the name the file had when it was imported.
+ * @param {string} id - the book the file belongs to.
+ * @param {string} format - the format of the file.
+ * @returns {string} a name that only uses ASCII characters.
+ */
+function asciiFileName(fileName, id, format) {
+  const base = String(fileName ?? '').trim();
+  const ascii = base.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '');
+  if (ascii !== '') return ascii;
+  return `${String(id ?? 'book').replace(/[^\x20-\x7e]/g, '_')}.${String(format ?? 'bin')}`;
+}
+
+/**
  * Activate the bundle row.
  * @param {object} ctx - the Host plugin context.
  */
@@ -157,6 +217,117 @@ export function apply(ctx) {
     // The shelf belongs to the Host and lives on disk, so the desktop app and
     // every browser see the same library.
     const shelf = createShelf(shelfOptions(connectionCtx));
+
+    // The source file of a book: the EPUB or PDF the learner imported. It is
+    // kept next to the shelf so the learner can look at the original file and
+    // take it away again.
+    connectionCtx.effect(() => {
+      try {
+        return connectionCtx.connection.fetch.register({
+          path: SOURCE_ROUTE,
+          methods: ['GET', 'POST'],
+          requestBody: 'buffered',
+          fetch: async (request) => {
+            try {
+              const url = new URL(request.url, 'http://localhost');
+              const id = url.searchParams.get('id') ?? '';
+              if (id === '') {
+                return Response.json(failure('reader/source-bad-request', '缺少书籍 id'), { status: 400 });
+              }
+              if (request.method === 'POST') {
+                const bytes = new Uint8Array(await request.arrayBuffer());
+                if (bytes.length === 0) {
+                  return Response.json(failure('reader/source-empty', '源文件是空的'), { status: 400 });
+                }
+                const meta = await shelf.putSource(id, {
+                  fileName: url.searchParams.get('name') ?? '',
+                  format: url.searchParams.get('format') ?? '',
+                  contentType: url.searchParams.get('type') ?? '',
+                  bytes,
+                });
+                if (meta === undefined) {
+                  return Response.json(failure('reader/source-failed', '源文件保存失败'), { status: 400 });
+                }
+                return Response.json({ ok: true, result: meta });
+              }
+              const source = await shelf.getSource(id);
+              if (source === undefined) {
+                return Response.json(failure('reader/source-missing', '这本书没有保留源文件'), { status: 404 });
+              }
+              const meta = source.meta;
+              const name = asciiFileName(meta.fileName, id, meta.format);
+              const download = url.searchParams.get('download') === '1';
+              return new Response(source.bytes, {
+                status: 200,
+                headers: {
+                  'content-type': meta.contentType || 'application/octet-stream',
+                  'content-length': String(source.bytes.length),
+                  'content-disposition': `${download ? 'attachment' : 'inline'}; filename="${name}"`,
+                  'x-reader-file-name': encodeURIComponent(meta.fileName || name),
+                },
+              });
+            } catch (error) {
+              return Response.json(
+                failure('reader/source-failed', error instanceof Error ? error.message : String(error)),
+                { status: 500 },
+              );
+            }
+          },
+        });
+      } catch (error) {
+        console.warn('[reader] source route registration failed: ' + String(error));
+        return () => {};
+      }
+    }, 'reader: ' + SOURCE_ROUTE);
+
+    connectionCtx.effect(() => {
+      try {
+        return connectionCtx.connection.fetch.register({
+          path: COVER_ROUTE,
+          methods: ['GET'],
+          // The body mode is not optional. A route without it gets a
+          // streaming body, and a GET with a body is not a legal request:
+          // the server answers 400 before this handler is ever reached.
+          requestBody: 'buffered',
+          fetch: async (request) => {
+            try {
+              const url = new URL(request.url, 'http://localhost');
+              const id = url.searchParams.get('id') ?? '';
+              if (id === '') {
+                return Response.json(failure('reader/cover-bad-request', '缺少书籍 id'), { status: 400 });
+              }
+              const cover = await shelf.getCover(id);
+              if (cover === undefined) {
+                return Response.json(failure('reader/cover-missing', '这本书没有封面'), { status: 404 });
+              }
+              // The bytes are the picture itself: no JSON envelope, no base64.
+              return new Response(cover.bytes, {
+                status: 200,
+                headers: {
+                  'content-type': cover.mime || 'application/octet-stream',
+                  'content-length': String(cover.bytes.length),
+                  // The address carries the hash of the picture, so a new
+                  // picture is a new address: the browser may keep this one
+                  // for good. That is also what lets the page fetch the very
+                  // same picture again — to shrink it — without paying for
+                  // the bytes twice.
+                  'cache-control': 'private, max-age=31536000, immutable',
+                },
+              });
+            } catch (error) {
+              return Response.json(
+                failure('reader/cover-failed', error instanceof Error ? error.message : String(error)),
+                { status: 500 },
+              );
+            }
+          },
+        });
+      } catch (error) {
+        console.warn('[reader] cover route registration failed: ' + String(error));
+        return () => {};
+      }
+    }, 'reader: ' + COVER_ROUTE);
+
     connectionCtx.effect(() => {
       try {
         return connectionCtx.connection.fetch.register({

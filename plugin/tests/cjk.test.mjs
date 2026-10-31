@@ -13,8 +13,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildUnits, splitSentences, tokenize } from '../src/lib/engine/segment.js';
-import { bookWordCount, wordFrequency } from '../src/lib/frequency.js';
+import { buildUnits, splitSentences, tokenize } from '../src/shared/segment.js';
+import { bookWordCount, wordFrequency } from '../src/shared/word-count.js';
 
 /** 一章中文样本。 */
 const CHINESE_CHAPTER = {

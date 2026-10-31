@@ -29,6 +29,16 @@ export const SHELF_UNAVAILABLE = 'shelf-unavailable';
 export const SHELF_FAILED = 'reader/failed';
 
 /**
+ * The error code that says: the Host knows the shelf, but not this action.
+ *
+ * A Host that has not been restarted yet does not know `books.summaries`. The
+ * page then asks for the whole shelf instead and builds the summaries itself
+ * — it must not treat this as "the Host has no shelf at all", because the
+ * shelf is there.
+ */
+export const SHELF_ACTION_UNKNOWN = 'reader/unknown-action';
+
+/**
  * The Host codes that mean "this Host does not know the shelf yet".
  *
  * `unknown-method` is what an application that has not been restarted
@@ -107,8 +117,10 @@ export async function callShelf(action, payload = {}, options = {}) {
   }
 
   // A Host that has not loaded the plugin answers 404 through the SPA
-  // fallback; a Host that knows the route but not the method answers 400.
-  if (response.status === 404 || response.status === 405 || response.status === 400) {
+  // fallback; a Host that knows the route but not the method or the action
+  // answers 400 — and the reason is in the body, so the body is read before
+  // the answer is judged.
+  if (response.status === 404 || response.status === 405) {
     throw makeError(SHELF_UNAVAILABLE, UNAVAILABLE_MESSAGE);
   }
 
@@ -116,6 +128,8 @@ export async function callShelf(action, payload = {}, options = {}) {
   try {
     body = typeof response.json === 'function' ? await response.json() : null;
   } catch (error) {
+    // A Host that does not know the route at all answers without a body.
+    if (response.status === 400) throw makeError(SHELF_UNAVAILABLE, UNAVAILABLE_MESSAGE);
     throw makeError(SHELF_FAILED, BAD_RESPONSE_MESSAGE, error);
   }
 
@@ -123,8 +137,17 @@ export async function callShelf(action, payload = {}, options = {}) {
     const code = typeof body?.error?.code === 'string' ? body.error.code : '';
     const message = typeof body?.error?.message === 'string' ? body.error.message.trim() : '';
     if (UNKNOWN_CODES.has(code)) {
-      throw makeError(SHELF_UNAVAILABLE, UNAVAILABLE_MESSAGE);
+      const error = makeError(SHELF_UNAVAILABLE, UNAVAILABLE_MESSAGE);
+      // The Host answered: it knows the shelf, but not this action. The page
+      // may have another way to get the same thing (an older action), so it
+      // must be able to tell this apart from "the Host has no shelf".
+      error.unknownAction = true;
+      error.action = action;
+      throw error;
     }
+    // A bare 400 without a reason is how a Host that does not know the route
+    // answers.
+    if (response.status === 400) throw makeError(SHELF_UNAVAILABLE, UNAVAILABLE_MESSAGE);
     throw makeError(SHELF_FAILED, message === '' ? FAILED_MESSAGE : message);
   }
 

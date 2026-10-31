@@ -28,14 +28,21 @@ export function detectLanguage(text) {
 /**
  * The language of a whole book: the language most of its paragraphs are in.
  *
- * @param {{ paragraphs?: string[] }[]} chapters
+ * A chapter has paragraphs; a unit (one sentence of the book) has text. Both
+ * carry the same characters, so the ratio is the same either way — and the
+ * shelf list carries no text, so the reader asks with the units it has.
+ *
+ * @param {{ paragraphs?: string[], text?: string }[]} chapters
  * @returns {'zh'|'en'}
  */
 export function detectBookLanguage(chapters) {
   let han = 0;
   let latin = 0;
   for (const chapter of chapters ?? []) {
-    for (const paragraph of chapter?.paragraphs ?? []) {
+    const paragraphs = Array.isArray(chapter?.paragraphs)
+      ? chapter.paragraphs
+      : [chapter?.text ?? ''];
+    for (const paragraph of paragraphs) {
       const value = String(paragraph ?? '');
       for (const ch of value) {
         if (HAN.test(ch)) han += 1;
