@@ -494,6 +494,15 @@ export function EnglishReaderPage({ t, build }) {
     return downloadSourceFile(id);
   }, []);
 
+  // The source file of a book: the EPUB or PDF the learner imported.
+  const openSource = useCallback((id) => {
+    setPreviewBookId(id);
+  }, []);
+
+  const downloadSource = useCallback(async (id) => {
+    return downloadSourceFile(id);
+  }, []);
+
   // The reader reports how long and how much was read; it lands on the book.
   const onActivity = useCallback(async (activity, playedMs) => {
     if (activeBookId === null) return;
