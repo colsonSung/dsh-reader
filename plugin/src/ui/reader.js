@@ -28,6 +28,9 @@ import { addEntry, listEntries, removeEntry } from '../lib/vocab.js';
 import { recordReading } from '../lib/activity.js';
 import { askAi } from '../lib/ai.js';
 import { blobToBase64, speakWord } from '../lib/speech.js';
+import { DEFAULT_TRANSLATION_LANGUAGE, TRANSLATION_LANGUAGES } from '../lib/languages.js';
+import { speakCached, warmAudio } from '../lib/tts-cache.js';
+import { createDeadline, describePlayback, nextStep, resolveSegments } from '../lib/playback.js';
 import { addNote, listNotes, removeNote } from '../lib/notes.js';
 import { listPodcasts, removePodcast, savePodcast } from '../lib/podcasts.js';
 import { NotesPanel } from './notes.js';
@@ -70,6 +73,26 @@ const TYPING_SETTINGS_KEY = 'reader:typing';
 /** Where the settings lived before the plugin was renamed. */
 const LEGACY_TYPING_SETTINGS_KEY = 'english-reader:typing';
 
+/** Where the read-aloud preferences live. */
+const PLAYBACK_SETTINGS_KEY = 'reader:playback';
+
+/**
+ * How the read-aloud plays when nothing was changed: the paragraph that is on
+ * the page, once, with no time limit.
+ */
+const DEFAULT_PLAYBACK_SETTINGS = {
+  scope: 'paragraph',
+  loop: false,
+  loopCount: 3,
+  limitMinutes: 0,
+  autoPlay: false,
+};
+
+/** How many times the range may be played again. Zero means "until stopped". */
+const LOOP_COUNTS = [2, 3, 5, 10, 0];
+/** After how many minutes the read-aloud stops by itself. Zero means "never". */
+const LIMIT_MINUTES = [0, 10, 30, 60, 120];
+
 const DEFAULT_TYPING_SETTINGS = {
   fontStyle: 'mono',
   fontSize: 20,
@@ -78,6 +101,8 @@ const DEFAULT_TYPING_SETTINGS = {
   speedUnit: 'words',
   forgive: false,
   hideInput: false,
+  // The language the full text translation is made in.
+  translationLanguage: DEFAULT_TRANSLATION_LANGUAGE,
   replacements: [
     { from: '\u2014', to: '-' },
     { from: '\u2013', to: '-' },
@@ -109,12 +134,20 @@ const FONT_FAMILIES = {
 };
 
 /**
- * Drop the punctuation a learner is not expected to type.
- * @param {string} text
- * @returns {string}
+ * The word as it should be typed.
+ *
+ * The book glues the sentence punctuation to the word ("better,"), and that
+ * punctuation is not part of what the learner is asked to type. The word's own
+ * punctuation stays: the apostrophe in "don't" belongs to the word, and so
+ * does the hyphen in "well-known".
+ *
+ * @param {string} text - the word as the book has it.
+ * @returns {string} the word to type.
  */
-function stripTrailingPunctuation(text) {
-  return text.replace(/[.,!?;:"“”'’)\]}]+$/u, '');
+function typableWord(text) {
+  return String(text ?? '')
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}]+$/u, '');
 }
 
 /**
@@ -127,12 +160,19 @@ function comparableWord(text) {
 }
 
 /**
- * Normalize text for an equality check.
- * @param {string} text
- * @returns {string}
+ * Compare what the learner typed with the word they had to type.
+ *
+ * The learner types what they see in the book, punctuation and all: "better,"
+ * is "better", and "dont" is "don't". The speech path compares the words the
+ * same way, so the typing path has to agree with it — otherwise a word is
+ * marked wrong for the comma the book itself put there.
+ *
+ * @param {string} typed - what the learner typed.
+ * @param {string} target - the word to type.
+ * @returns {boolean} true when the two are the same word.
  */
-function comparable(text) {
-  return text.trim().replace(/\s+/gu, ' ').toLowerCase();
+function matchesTarget(typed, target) {
+  return comparableWord(String(typed ?? '').trim()) === comparableWord(String(target ?? '').trim());
 }
 
 /**
@@ -274,6 +314,37 @@ function loadTypingSettings() {
  */
 
 /**
+ * Read the read-aloud preferences.
+ *
+ * The learner picks the range, the repeats and the time limit once; they are
+ * still there the next day.
+ *
+ * @returns {{ scope: string, loop: boolean, loopCount: number, limitMinutes: number }}
+ */
+function loadPlaybackSettings() {
+  try {
+    const raw = globalThis.localStorage?.getItem(PLAYBACK_SETTINGS_KEY);
+    if (raw === undefined || raw === null) return { ...DEFAULT_PLAYBACK_SETTINGS };
+    const parsed = JSON.parse(raw);
+    return { ...DEFAULT_PLAYBACK_SETTINGS, ...parsed };
+  } catch {
+    return { ...DEFAULT_PLAYBACK_SETTINGS };
+  }
+}
+
+/**
+ * Store the read-aloud preferences.
+ * @param {object} settings
+ */
+function savePlaybackSettings(settings) {
+  try {
+    globalThis.localStorage?.setItem(PLAYBACK_SETTINGS_KEY, JSON.stringify(settings));
+  } catch {
+    // A browser without localStorage simply keeps the defaults.
+  }
+}
+
+/**
  * Turn an engine error into a sentence in the learner's language.
  *
  * The engine reports a machine readable code; the page owns the wording.
@@ -299,6 +370,20 @@ function saveTypingSettings(settings) {
   } catch {
     // A browser without localStorage simply keeps the defaults.
   }
+}
+
+/**
+ * The cloud voice's own id.
+ *
+ * The voice list marks a cloud voice with a prefix, so that it can be told
+ * apart from the browser's own voices. The speech model does not know that
+ * prefix: it has to be taken off before the voice is asked for.
+ *
+ * @param {string} id - the id as the voice list carries it.
+ * @returns {string} the id the speech model knows.
+ */
+function cloudVoiceId(id) {
+  return String(id ?? '').replace(/^mm:/, '');
 }
 
 /**
@@ -362,7 +447,7 @@ function buildPractice(entries, replacements = []) {
   let offset = 0;
   entries.forEach((entry) => {
     (entry.unit.words ?? []).forEach((word, wordIndex) => {
-      const text = stripTrailingPunctuation(applyReplacements(word.text, replacements));
+      const text = typableWord(applyReplacements(word.text, replacements));
       if (text.length === 0) return;
       words.push({
         text,
@@ -484,12 +569,13 @@ export function ReaderView({
   const language = useMemo(() => detectBookLanguage(units), [units]);
   if (ttsRef.current === null) {
     ttsRef.current = createTts({
-      // 云端音色走宿主的 MiniMax 语音合成；失败时引擎自动回落到本机合成
+      // 云端音色走宿主的 MiniMax 语音合成；失败时引擎自动回落到本机合成。
+      // 合成的音频留在缓存里：同一段话再读一次，用的是已经做好的那一份。
       remote: {
-        speak: (text, options) => askAi('tts', {
-          text,
+        speak: (text, options) => speakCached(text, {
           voiceId: options?.voiceId,
           rate: options?.rate,
+          ask: (payload) => askAi('tts', payload),
         }),
       },
       getCloudVoices: () => cloudVoicesRef.current,
@@ -559,7 +645,23 @@ export function ReaderView({
   const [interjectError, setInterjectError] = useState('');
   const interjectRecorderRef = useRef(null);
   const podcastBookRef = useRef(book?.id ?? '');
-  const [repeat, setRepeat] = useState(false);
+  // How the read-aloud plays: which range it covers, whether it repeats, how
+  // many times, and when it stops by itself.
+  const [playbackSettings, setPlaybackSettings] = useState(loadPlaybackSettings);
+  // The panel with those settings hangs above the button in the foot bar.
+  const [playPanelOpen, setPlayPanelOpen] = useState(false);
+  // Where the playback is: the paragraph it is on and how many passes it made.
+  const playbackRef = useRef({ segmentIndex: 0, pass: 0, active: false, token: 0 });
+  // The clock that stops a long playback.
+  const deadlineRef = useRef(null);
+  // The paragraph the playback moved the reader to. The speech must not be cut
+  // off when the reader moves on its own, but a move the learner made still
+  // stops the reading.
+  const playbackAnchorRef = useRef(-1);
+  // The button that opens the playback panel, and the panel itself.
+  const playAnchorRef = useRef(null);
+  const playPanelRef = useRef(null);
+  const [playAnchorRect, setPlayAnchorRect] = useState(null);
 
   const recognizerRef = useRef(null);
   const recorderRef = useRef(null);
@@ -794,6 +896,57 @@ export function ReaderView({
     return { ...flat, entries };
   }, [currentParagraph, units]);
 
+  // The paragraphs the read-aloud covers: the range the learner picked.
+  const segments = useMemo(
+    () => resolveSegments({
+      paragraphs,
+      units,
+      scope: playbackSettings.scope,
+      startParagraphIndex: currentParagraphIndex,
+    }),
+    [paragraphs, units, playbackSettings.scope, currentParagraphIndex],
+  );
+
+  // The playback reads the book from this ref: the speech callback runs long
+  // after the render that started it, and it must see the newest book.
+  const playbackCtxRef = useRef({
+    paragraphs: [],
+    units: [],
+    currentParagraphIndex: 0,
+    settings: { ...DEFAULT_PLAYBACK_SETTINGS },
+  });
+  useEffect(() => {
+    playbackCtxRef.current = {
+      paragraphs,
+      units,
+      currentParagraphIndex,
+      settings: playbackSettings,
+    };
+  }, [paragraphs, units, currentParagraphIndex, playbackSettings]);
+
+  // The read-aloud ends: the range is done, the clock ran out, or the learner
+  // pressed stop.
+  const endPlayback = useCallback((note) => {
+    // A new token ends the callbacks of the running playback: a paragraph that
+    // finishes late must not start the next one.
+    playbackRef.current = { ...playbackRef.current, active: false, token: playbackRef.current.token + 1 };
+    deadlineRef.current?.reset();
+    playbackAnchorRef.current = -1;
+    setPlaying(false);
+    setSpokenWord(-1);
+    if (playedRef.current.since !== 0) {
+      playedRef.current.ms += Date.now() - playedRef.current.since;
+      playedRef.current.since = 0;
+      flushRef.current();
+    }
+    if (typeof note === 'string' && note !== '') setTtsNote(note);
+  }, []);
+
+  const stopSpeaking = useCallback(() => {
+    tts.cancel();
+    endPlayback();
+  }, [tts, endPlayback]);
+
   const practiceKey = scope === 'paragraph'
     ? `p${currentParagraphIndex}`
     : scope === 'cloze'
@@ -806,7 +959,7 @@ export function ReaderView({
     const list = [];
     paragraph.words.forEach((word, position) => {
       if (vocabEntries[normalizeWordId(word.text)] === undefined) return;
-      list.push({ text: stripTrailingPunctuation(word.text), displayIndex: position });
+      list.push({ text: typableWord(word.text), displayIndex: position });
     });
     return list;
   }, [paragraph.words, vocabEntries]);
@@ -897,8 +1050,15 @@ export function ReaderView({
     return () => { observer.disconnect(); };
   }, []);
 
-  // The Chinese translation of every paragraph on the page, fetched on demand.
+  // The translation of every paragraph on the page, fetched on demand.
   const translationsRef = useRef({});
+
+  // The language changed: the translations of the old one are of no use.
+  useEffect(() => {
+    translationsRef.current = {};
+    setTranslations({});
+  }, [settings.translationLanguage]);
+
   useEffect(() => {
     if (!modes.translate) return undefined;
     let cancelled = false;
@@ -917,7 +1077,10 @@ export function ReaderView({
       if (pending.length === 0) return;
       const results = await Promise.all(pending.map(async (item) => {
         try {
-          const result = await askAi('translate', { text: item.text });
+          const result = await askAi('translate', {
+        text: item.text,
+        target: settings.translationLanguage,
+      });
           return [item.index, result?.text ?? ''];
         } catch {
           return [item.index, ''];
@@ -931,7 +1094,7 @@ export function ReaderView({
     };
     void load();
     return () => { cancelled = true; };
-  }, [modes.translate, pageRange, units, paragraphs]);
+  }, [modes.translate, pageRange, units, paragraphs, settings.translationLanguage]);
 
   // Translate one paragraph on its own. The translation lands under it, in the
   // same place the full-text switch puts it.
@@ -941,7 +1104,10 @@ export function ReaderView({
     try {
       const text = group.unitIndexes.map((unitIndex) => units[unitIndex]?.text ?? '').join(' ');
       if (text.trim() === '') return;
-      const result = await askAi('translate', { text });
+      const result = await askAi('translate', {
+        text,
+        target: settings.translationLanguage,
+      });
       const value = result?.text ?? '';
       // A failed translation leaves the paragraph alone rather than showing
       // an empty line.
@@ -954,7 +1120,7 @@ export function ReaderView({
     } finally {
       setTranslatingParagraph(-1);
     }
-  }, [translatingParagraph, units]);
+  }, [translatingParagraph, units, settings.translationLanguage]);
 
   // Read one paragraph aloud, on its own. A second click stops it.
   const speakParagraph = useCallback((group, paragraphIndex) => {
@@ -989,17 +1155,90 @@ export function ReaderView({
     setWordInput('');
     setWordResults([]);
     setStartedAt(0);
-    setSpokenWord(-1);
+    // The playback moves the reader on its own: the word it is speaking must
+    // not lose its highlight.
+    if (playbackAnchorRef.current !== currentParagraphIndex) setSpokenWord(-1);
     setTranscript('');
     setInterim('');
     setSpokenResult(null);
     setAudioUrl('');
-  }, [practiceKey]);
+  }, [practiceKey, currentParagraphIndex]);
+
+  // The practice unit changed: the reading of the old unit stops. The
+  // playback moves the reader itself, so its speech must not be cut off when
+  // it does; a move the learner made still stops the reading.
+  useEffect(() => {
+    if (playbackAnchorRef.current !== currentParagraphIndex) stopSpeaking();
+  }, [practiceKey, currentParagraphIndex, stopSpeaking]);
+
+  // Read the unit that is being practised, on its own. This is what the
+  // auto-play speaks when the learner moves on: one unit, not the whole
+  // range, because the range would start over from its beginning.
+  const speakCurrentUnit = useCallback(() => {
+    if (unit === undefined) return;
+    const wholeParagraph = scope === 'paragraph';
+    const text = wholeParagraph ? paragraph.text : unit.text;
+    const words = wholeParagraph ? paragraph.words : (unit.words ?? []);
+    const base = wholeParagraph ? 0 : (activeEntry?.displayOffset ?? 0);
+    if (text.trim() === '') return;
+    setTtsNote('');
+    tts.cancel();
+    setPlaying(true);
+    tts.speak(text, {
+      onWord: (wordIndex, charIndex) => {
+        let position = wordIndex;
+        if (typeof charIndex === 'number' && charIndex >= 0) {
+          const found = words.findIndex((word) => word.start <= charIndex && charIndex < word.end);
+          if (found >= 0) position = found;
+        }
+        setSpokenWord(base + position);
+      },
+      onEnd: () => {
+        setPlaying(false);
+        setSpokenWord(-1);
+      },
+      onError: (error) => {
+        setPlaying(false);
+        setSpokenWord(-1);
+        setTtsNote(error?.message ?? t('reader.speakFailed'));
+      },
+    });
+  }, [scope, paragraph, unit, activeEntry, tts, t]);
+
+  // The speaking step lives in a ref: the effect that watches the position
+  // must not run again every time the callback is rebuilt.
+  const speakUnitRef = useRef(null);
+  useEffect(() => { speakUnitRef.current = speakCurrentUnit; });
+
+  // The learner asked for another place in the book. The flag tells the
+  // effect below that the move was theirs: the read-aloud moving the reader
+  // on its own must not start a second reading.
+  const learnerMoveRef = useRef(false);
+  const goTo = useCallback((target) => {
+    learnerMoveRef.current = true;
+    onIndexChange(target);
+  }, [onIndexChange]);
+
+  // With the auto-play on, the place the learner moved to is read aloud.
+  //
+  // Only while listening: in the typing mode the speech follows the typing,
+  // and in the speaking mode the learner is the one talking — the machine
+  // would talk over them, and the recorder would hear it.
+  useEffect(() => {
+    if (!learnerMoveRef.current) return;
+    learnerMoveRef.current = false;
+    if (!playbackSettings.autoPlay) return;
+    if (mode !== 'listen') return;
+    speakUnitRef.current?.();
+  }, [index, mode]);
 
   useEffect(() => {
-    tts.cancel();
-    sync.setWords(practice.words.map((word) => word.text));
-  }, [practiceKey, practice, tts, sync]);
+    // The read-aloud moving the reader is not the learner's move: the speech
+    // belongs to the read-aloud, so the sync driver only resets its own state
+    // and leaves the voice alone.
+    const keepSpeech = playbackAnchorRef.current === currentParagraphIndex;
+    sync.setWords(practice.words.map((word) => word.text), { keepSpeech });
+  }, [practice, sync, currentParagraphIndex]);
 
   // The typing surface keeps the focus while the learner types.
   useEffect(() => {
@@ -1097,8 +1336,8 @@ export function ReaderView({
     const target = node?.target;
     if (typeof target !== 'number' || target < 0) return;
     setMindMapOpen(false);
-    onIndexChange(target);
-  }, [onIndexChange]);
+    goTo(target);
+  }, [goTo]);
 
   // The episodes of this book, newest first.
   const refreshPodcasts = useCallback(async () => {
@@ -1427,17 +1666,19 @@ export function ReaderView({
       : Math.round(typingStats.correctWords / minutes);
   const practiceComplete = wordIndex >= practice.words.length && practice.words.length > 0;
 
-  // The speech follows the typing: the driver pauses when the learner falls
-  // behind and re-reads from the typing position when they run ahead.
+  // The speech follows the typing, one word at a time: the word the learner
+  // is on is the word that is read, so the ear is always on the word the hand
+  // is writing.
   useEffect(() => {
     if (mode !== 'type' || muted) return;
-    if (wordIndex > 0 || wordInput.length > 0) sync.syncTo(Math.min(wordIndex, practice.words.length - 1));
+    if (practice.words.length === 0) return;
+    sync.syncTo(Math.min(wordIndex, practice.words.length - 1));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wordIndex, mode, muted]);
+  }, [wordIndex, mode, muted, practice.words.length]);
 
   const commitWord = useCallback((typed) => {
     const target = practice.words[wordIndex]?.text ?? '';
-    const clean = comparable(typed) === comparable(target);
+    const clean = matchesTarget(typed, target);
     setWordResults((results) => {
       const next = results.slice();
       next[wordIndex] = typed;
@@ -1449,9 +1690,11 @@ export function ReaderView({
       return;
     }
     // Without "forgive mistakes" the learner stays on the word until it is
-    // typed correctly; the word keeps its error marking in the text.
+    // typed correctly; the word keeps its error marking in the text. The word
+    // is said again, so the ear gets a second chance at it.
     setWordInput(typed);
-  }, [practice.words, settings.forgive, wordIndex]);
+    if (!muted) sync.repeat();
+  }, [practice.words, settings.forgive, wordIndex, muted, sync]);
 
   const onWordChange = useCallback((event) => {
     const value = event.target.value;
@@ -1496,71 +1739,254 @@ export function ReaderView({
     });
   }, []);
 
-  const stopSpeaking = useCallback(() => {
-    tts.cancel();
-    setPlaying(false);
-    setSpokenWord(-1);
-    if (playedRef.current.since !== 0) {
-      playedRef.current.ms += Date.now() - playedRef.current.since;
-      playedRef.current.since = 0;
-      flushRef.current();
-    }
-  }, [tts]);
+  // The read-aloud preferences are kept between the sessions.
+  const updatePlaybackSettings = useCallback((patch) => {
+    setPlaybackSettings((current) => {
+      const next = { ...current, ...patch };
+      savePlaybackSettings(next);
+      return next;
+    });
+  }, []);
 
-  const playActive = useCallback(() => {
-    if (unit === undefined) return;
-    if (playedRef.current.since === 0) playedRef.current.since = Date.now();
-    const wholeParagraph = scope === 'paragraph';
-    const text = wholeParagraph ? paragraph.text : unit.text;
-    const words = wholeParagraph ? paragraph.words : (unit.words ?? []);
-    const base = wholeParagraph ? 0 : (activeEntry?.displayOffset ?? 0);
-    setTtsNote('');
-    tts.cancel();
-    setPlaying(true);
-    tts.speak(text, {
-      onWord: (wordIndex_, charIndex) => {
-        let position = wordIndex_;
+  // The panel opens above the button that opened it.
+  const togglePlayPanel = useCallback(() => {
+    if (!playPanelOpen) {
+      const rect = playAnchorRef.current?.getBoundingClientRect?.();
+      if (rect !== undefined && rect !== null) {
+        // The panel rests on the top edge of the transport bar, not on the
+        // button: a panel that covers the bar it belongs to reads as a mistake.
+        const bar = playAnchorRef.current?.closest?.('.er-read-foot')?.getBoundingClientRect?.();
+        setPlayAnchorRect({
+          left: rect.left,
+          top: rect.top,
+          width: rect.width,
+          barTop: bar === undefined || bar === null ? rect.top : bar.top,
+        });
+      }
+    }
+    setPlayPanelOpen((open) => !open);
+  }, [playPanelOpen]);
+
+  // Clicking outside the panel closes it, and Escape does too.
+  useEffect(() => {
+    if (!playPanelOpen) return undefined;
+    const onClick = (event) => {
+      const target = event.target;
+      if (playPanelRef.current?.contains?.(target)) return;
+      if (playAnchorRef.current?.contains?.(target)) return;
+      setPlayPanelOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setPlayPanelOpen(false);
+    };
+    document.addEventListener('click', onClick);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('click', onClick);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [playPanelOpen]);
+
+  // Where the panel sits: above the transport bar, and always inside the window.
+  const playPanelStyle = useMemo(() => {
+    const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
+    const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
+    const width = Math.min(300, Math.max(220, viewportWidth - 24));
+    if (playAnchorRect === null) return { left: 12, bottom: 12, width };
+    const left = Math.max(12, Math.min(playAnchorRect.left, viewportWidth - width - 12));
+    // The panel grows upwards from the bar; when there is not enough room above
+    // it, it slides down instead of leaving the window.
+    const height = Math.min(280, viewportHeight * 0.7);
+    const anchorTop = playAnchorRect.barTop ?? playAnchorRect.top;
+    const bottom = Math.min(
+      viewportHeight - anchorTop + 8,
+      Math.max(12, viewportHeight - 12 - height),
+    );
+    // The little foot of the panel points at the middle of the button.
+    const centre = playAnchorRect.left + (playAnchorRect.width ?? 32) / 2;
+    const arrow = Math.max(16, Math.min(centre - left - 5, width - 26));
+    return { left, bottom, width, '--er-play-arrow': `${arrow}px` };
+  }, [playAnchorRect]);
+
+  // The name of the range the learner picked.
+  const playScopeLabel = useMemo(() => {
+    if (playbackSettings.scope === 'chapter') return t('reader.playRangeChapter');
+    if (playbackSettings.scope === 'book') return t('reader.playRangeBook');
+    return t('reader.playRangeParagraph');
+  }, [playbackSettings.scope, t]);
+
+  // The badge on the button: the range, and the repeats when there are any.
+  const playBadge = useMemo(() => {
+    if (!playbackSettings.loop) return playScopeLabel;
+    const described = describePlayback(playbackSettings);
+    return `${playScopeLabel} ${described.unlimited ? '∞' : `×${described.passes}`}`;
+  }, [playbackSettings, playScopeLabel]);
+
+  // How many paragraphs the range covers: a quiet note beside the caption.
+  const playSegmentNote = useMemo(() => (
+    segments.length > 1 ? t('reader.playSummarySegments', { n: segments.length }) : ''
+  ), [segments.length, t]);
+
+  // What the settings mean, in one line.
+  const playSummary = useMemo(() => {
+    const described = describePlayback(playbackSettings);
+    const parts = [];
+    if (described.unlimited) parts.push(t('reader.playSummaryForever'));
+    else if (described.passes > 1) parts.push(t('reader.playSummaryRepeats', { n: described.passes }));
+    else parts.push(t('reader.playSummaryOnce'));
+    if (playbackSettings.limitMinutes > 0) {
+      parts.push(t('reader.playSummaryLimit', { n: playbackSettings.limitMinutes }));
+    }
+    return parts.join(', ');
+  }, [playbackSettings, t]);
+
+  // The paragraphs of the range that is playing right now.
+  const playbackSegmentsRef = useRef([]);
+  // The speaking step lives in a ref: the speech callback calls itself for the
+  // next paragraph, long after the render that started it.
+  const speakSegmentRef = useRef(null);
+
+  // What comes after the segment that is being read.
+  const stepAfter = useCallback((segmentIndex, pass) => {
+    const settings = playbackCtxRef.current.settings;
+    return nextStep({
+      segmentIndex,
+      segmentCount: playbackSegmentsRef.current.length,
+      pass,
+      loop: settings.loop,
+      loopCount: settings.loopCount,
+    });
+  }, []);
+
+  // Make the next paragraph's audio while this one is being read: the
+  // reading does not wait for the network between two paragraphs.
+  const warmNextSegment = useCallback((segmentIndex, pass) => {
+    const step = stepAfter(segmentIndex, pass);
+    if (step.done) return;
+    const next = playbackSegmentsRef.current[step.segmentIndex];
+    if (next === undefined) return;
+    const selected = tts.getVoice();
+    // A local voice needs no warm-up: the browser makes the speech itself.
+    if (selected?.cloud !== true) return;
+    void warmAudio(next.text, {
+      voiceId: cloudVoiceId(selected.id),
+      rate: tts.getRate(),
+      ask: (payload) => askAi('tts', payload),
+    });
+  }, [stepAfter, tts]);
+
+  // One paragraph of the range is read aloud. What comes next is decided when
+  // this one ends.
+  const speakSegment = useCallback((segmentIndex, pass, token) => {
+    const list = playbackSegmentsRef.current;
+    const segment = list[segmentIndex];
+    if (segment === undefined) {
+      endPlayback();
+      return;
+    }
+    // The page follows the reading: the reader moves to the paragraph that is
+    // spoken, so the learner sees the words that are being read.
+    if (segment.paragraphIndex !== playbackCtxRef.current.currentParagraphIndex) {
+      playbackAnchorRef.current = segment.paragraphIndex;
+      onIndexChange(segment.unitIndexes[0]);
+    }
+    setSpokenWord(-1);
+    warmNextSegment(segmentIndex, pass);
+    tts.speak(segment.text, {
+      onWord: (wordIndex, charIndex) => {
+        if (playbackRef.current.token !== token) return;
+        let position = wordIndex;
         if (typeof charIndex === 'number' && charIndex >= 0) {
-          const found = words.findIndex((word) => word.start <= charIndex && charIndex < word.end);
+          const found = segment.words.findIndex((word) => word.start <= charIndex && charIndex < word.end);
           if (found >= 0) position = found;
         }
-        setSpokenWord(base + position);
+        setSpokenWord(position);
       },
       onEnd: () => {
-        setPlaying(false);
-        setSpokenWord(-1);
-        if (playedRef.current.since !== 0) {
-          playedRef.current.ms += Date.now() - playedRef.current.since;
-          playedRef.current.since = 0;
+        if (playbackRef.current.token !== token) return;
+        const step = stepAfter(segmentIndex, pass);
+        if (step.done) {
+          endPlayback(t('reader.playFinished'));
+          return;
         }
-        if (repeat) {
-          window.setTimeout(() => { playActive(); }, 500);
-        }
+        speakSegmentRef.current?.(step.segmentIndex, step.pass, token);
       },
       onError: (error) => {
-        setPlaying(false);
-        setSpokenWord(-1);
-        setTtsNote(error?.message ?? t('reader.speakFailed'));
+        if (playbackRef.current.token !== token) return;
+        tts.cancel();
+        endPlayback(error?.message ?? t('reader.speakFailed'));
       },
     });
-  }, [scope, paragraph, unit, activeEntry, repeat, tts, t]);
+  }, [tts, onIndexChange, endPlayback, stepAfter, warmNextSegment, t]);
 
-  // The shelf asks the book to read itself out loud.
+  useEffect(() => { speakSegmentRef.current = speakSegment; });
+
+  // Start the read-aloud. The range is resolved here and not in the memo, so
+  // the shelf can ask for the whole book without changing the learner's own
+  // setting.
+  const startPlayback = useCallback((scopeOverride) => {
+    const ctx = playbackCtxRef.current;
+    const scope = scopeOverride ?? ctx.settings.scope;
+    const list = resolveSegments({
+      paragraphs: ctx.paragraphs,
+      units: ctx.units,
+      scope,
+      startParagraphIndex: ctx.currentParagraphIndex,
+    });
+    if (list.length === 0) return;
+    if (typeof speakSegmentRef.current !== 'function') return;
+    playbackSegmentsRef.current = list;
+    const token = playbackRef.current.token + 1;
+    playbackRef.current = { segmentIndex: 0, pass: 0, active: true, token };
+    // The clock runs with the reading: a playback that is stopped by hand
+    // does not count towards the limit.
+    const deadline = createDeadline({
+      limitMs: ctx.settings.limitMinutes > 0 ? ctx.settings.limitMinutes * 60000 : 0,
+    });
+    deadline.start();
+    deadlineRef.current = deadline;
+    if (playedRef.current.since === 0) playedRef.current.since = Date.now();
+    setTtsNote('');
+    setPlaying(true);
+    speakSegmentRef.current(0, 0, token);
+  }, []);
+
+  // The play button reads the range the learner picked.
+  const playActive = useCallback(() => {
+    startPlayback();
+  }, [startPlayback]);
+
+  // The clock that stops a long playback.
+  useEffect(() => {
+    if (!playing) return undefined;
+    const timer = setInterval(() => {
+      const deadline = deadlineRef.current;
+      if (deadline === null || !deadline.expired()) return;
+      tts.cancel();
+      endPlayback(t('reader.playStoppedByLimit', { n: playbackSettings.limitMinutes }));
+    }, 1000);
+    return () => { clearInterval(timer); };
+  }, [playing, playbackSettings.limitMinutes, endPlayback, tts, t]);
+
+  // The shelf asks the book to read itself out loud: that is a request for
+  // the whole book, whatever range the reader plays.
   const playedTokenRef = useRef(0);
   useEffect(() => {
     if (autoPlayToken === undefined || autoPlayToken === 0) return;
     if (autoPlayToken === playedTokenRef.current) return;
     playedTokenRef.current = autoPlayToken;
-    playActive();
-  }, [autoPlayToken]);
+    startPlayback('book');
+  }, [autoPlayToken, startPlayback]);
 
   // Pronouncing a word uses the cloud voice; the built-in voice is the
   // fallback, so a word is always audible.
   const pronounce = useCallback((text) => {
     const selected = tts.getVoice();
+    // The speech model knows the voice's own id: the prefix that marks it as a
+    // cloud voice in the list has to be taken off first.
     const voiceId = selected?.cloud === true
-      ? selected.id
-      : (cloudVoicesRef.current[0] ? `mm:${cloudVoicesRef.current[0].id}` : undefined);
+      ? cloudVoiceId(selected.id)
+      : (cloudVoicesRef.current[0] ? cloudVoicesRef.current[0].id : undefined);
     void speakWord(text, {
       voiceId,
       rate: tts.getRate(),
@@ -1691,12 +2117,12 @@ export function ReaderView({
   const move = useCallback((delta) => {
     if (scope === 'paragraph') {
       const target = paragraphs[currentParagraphIndex + delta];
-      if (target !== undefined) onIndexChange(target.unitIndexes[0]);
+      if (target !== undefined) goTo(target.unitIndexes[0]);
       return;
     }
     const next = Math.max(0, Math.min(units.length - 1, index + delta));
-    onIndexChange(next);
-  }, [scope, paragraphs, currentParagraphIndex, index, units.length, onIndexChange]);
+    goTo(next);
+  }, [scope, paragraphs, currentParagraphIndex, index, units.length, goTo]);
 
   // The arrow keys turn the page while reading. They are ignored while the
   // learner is typing, so the caret in the input keeps working.
@@ -1821,21 +2247,27 @@ export function ReaderView({
     const target = practice.words[practiceIndex]?.text ?? text;
     const isCurrent = practiceIndex === wordIndex;
     const typed = isCurrent ? wordInput : (wordResults[practiceIndex] ?? '');
-    const wrong = typed.length > 0 && comparable(typed) !== comparable(target);
+    const wrong = typed.length > 0 && !matchesTarget(typed, target);
     if (!isCurrent && !wrong) return text;
-    const length = Math.max(target.length, typed.length);
+    // The punctuation of the original word stays outside the comparison.
+    const suffix = text.startsWith(target) ? text.slice(target.length) : '';
+    // The punctuation the learner typed along with the word is the book's own
+    // punctuation: it is drawn once, as the suffix, not twice.
+    const extra = typed.slice(target.length);
+    const typedExtra = suffix !== '' && extra.startsWith(suffix) ? extra.slice(suffix.length) : extra;
+    const length = target.length + typedExtra.length;
     const chars = [];
     for (let i = 0; i < length; i += 1) {
-      const typedChar = i < typed.length ? typed[i] : null;
+      const typedChar = i < target.length
+        ? (i < typed.length ? typed[i] : null)
+        : typedExtra[i - target.length];
       const targetChar = i < target.length ? target[i] : null;
       const character = typedChar ?? targetChar ?? '';
       const className = typedChar === null
         ? 'er-char is-pending-char'
-        : typedChar === targetChar ? 'er-char' : 'er-char is-bad-char';
+        : targetChar === null || typedChar !== targetChar ? 'er-char is-bad-char' : 'er-char';
       chars.push(h('span', { key: i, className }, character));
     }
-    // The punctuation of the original word stays outside the comparison.
-    const suffix = text.startsWith(target) ? text.slice(target.length) : '';
     if (suffix.length > 0) chars.push(h('span', { key: 'suffix', className: 'er-char' }, suffix));
     return chars;
   };
@@ -1845,6 +2277,25 @@ export function ReaderView({
   const settingsPanel = () => h(
           'div',
           { className: 'er-settings' },
+          h(
+            'div',
+            { className: 'er-setting-row' },
+            h('span', { className: 'er-setting-label' }, t('reader.translationLanguage')),
+            h(
+              'select',
+              {
+                className: 'er-select',
+                value: settings.translationLanguage,
+                'aria-label': t('reader.translationLanguage'),
+                onChange: (event) => { updateSettings({ translationLanguage: event.target.value }); },
+              },
+              TRANSLATION_LANGUAGES.map((language) => h(
+                'option',
+                { key: language.id, value: language.id },
+                language.name,
+              )),
+            ),
+          ),
           h(
             'div',
             { className: 'er-setting-row' },
@@ -2021,89 +2472,116 @@ export function ReaderView({
     : Math.round(((unitWordCount - toLearnCount) / unitWordCount) * 100);
   const estMinutes = Math.max(1, Math.ceil(unitWordCount / 200));
 
+  // The read bar: three zones, separated by a hairline — the book you are
+  // reading, the place you are in it, and what you can do from here. The book
+  // is the heading, so it leads; the numbers about the book are the quietest.
   const renderReadBar = () => h(
     'div',
     { className: 'er-read-bar' },
     h(
-      'button',
-      {
-        type: 'button',
-        className: 'er-round-icon er-exit-button',
-        title: t('reader.exitBook'),
-        'aria-label': t('reader.exitBook'),
-        onClick: () => { onExit?.(); },
-      },
-      h(ExitIcon, { size: 15 }),
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
-        className: 'er-round-icon er-notes-button',
-        title: t('notes.title'),
-        'aria-label': t('notes.title'),
-        onClick: () => { setNotesOpen(true); },
-      },
-      h(NoteIcon, { size: 15 }),
-      noteCount > 0 ? h('span', { className: 'er-notes-badge' }, String(noteCount)) : null,
-    ),
-    h(
-      'select',
-      {
-        className: 'er-select',
-        value: String(unit.chapterIndex),
-        onChange: (event) => {
-          const target = chapters.find((entry) => String(entry.index) === event.target.value);
-          if (target !== undefined) onIndexChange(target.unitIndex);
+      'div',
+      { className: 'er-read-head' },
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-exit-button',
+          title: t('reader.exitBook'),
+          'aria-label': t('reader.exitBook'),
+          onClick: () => { onExit?.(); },
         },
-      },
-      chapters.map((entry) => h('option', { key: entry.index, value: String(entry.index) }, entry.title)),
+        h(ExitIcon, { size: 16 }),
+      ),
+      h('span', { className: 'er-read-title', title: book?.title ?? '' }, book?.title ?? ''),
     ),
     h(
-      'span',
-      { className: 'er-counter' },
-      format(t('reader.position'), {
-        p: currentParagraphIndex + 1,
-        pt: paragraphs.length,
-        s: sentencePosition + 1,
-        st: sentenceTotal,
-      }),
+      'div',
+      { className: 'er-read-place' },
+      h(
+        'select',
+        {
+          className: 'er-read-chapter',
+          value: String(unit.chapterIndex),
+          title: t('reader.chapter'),
+          'aria-label': t('reader.chapter'),
+          onChange: (event) => {
+            const target = chapters.find((entry) => String(entry.index) === event.target.value);
+            if (target !== undefined) goTo(target.unitIndex);
+          },
+        },
+        chapters.map((entry) => h('option', { key: entry.index, value: String(entry.index) }, entry.title)),
+      ),
+      h(
+        'span',
+        {
+          className: 'er-read-counter',
+          // The short form is what the bar shows; the long one explains it.
+          title: format(t('reader.position'), {
+            p: currentParagraphIndex + 1,
+            pt: paragraphs.length,
+            s: sentencePosition + 1,
+            st: sentenceTotal,
+          }),
+        },
+        format(t('reader.positionShort'), {
+          p: currentParagraphIndex + 1,
+          pt: paragraphs.length,
+          s: sentencePosition + 1,
+          st: sentenceTotal,
+        }),
+      ),
     ),
-    h('span', { className: 'er-counter er-read-title', title: book?.title ?? '' }, book?.title ?? ''),
     h(
-      'button',
-      {
-        type: 'button',
-        className: 'er-wordlist-button',
-        title: t('reader.openWordList'),
-        onClick: () => { onOpenWordList?.(); },
-      },
-      t('reader.wordList'),
-      Object.keys(vocabEntries).length > 0
-        ? h('span', { className: 'er-wordlist-count' }, String(Object.keys(vocabEntries).length))
-        : null,
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
-        className: 'er-round-icon er-read-extra',
-        title: t('mindmap.open'),
-        'aria-label': t('mindmap.open'),
-        onClick: () => { openMindMap(); },
-      },
-      h(MindMapIcon, { size: 15 }),
-    ),
-    h(
-      'button',
-      {
-        type: 'button',
-        className: 'er-round-icon er-read-extra',
-        title: t('podcast.open'),
-        'aria-label': t('podcast.open'),
-        onClick: () => { openPodcast(); },
-      },
-      h(PodcastIcon, { size: 15 }),
+      'div',
+      { className: 'er-read-actions' },
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-notes-button',
+          title: t('notes.title'),
+          'aria-label': t('notes.title'),
+          onClick: () => { setNotesOpen(true); },
+        },
+        h(NoteIcon, { size: 16 }),
+        noteCount > 0 ? h('span', { className: 'er-notes-badge' }, String(noteCount)) : null,
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-read-extra',
+          title: t('mindmap.open'),
+          'aria-label': t('mindmap.open'),
+          onClick: () => { openMindMap(); },
+        },
+        h(MindMapIcon, { size: 16 }),
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-read-extra',
+          title: t('podcast.open'),
+          'aria-label': t('podcast.open'),
+          onClick: () => { openPodcast(); },
+        },
+        h(PodcastIcon, { size: 16 }),
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-wordlist-button',
+          title: t('reader.openWordList'),
+          onClick: () => { onOpenWordList?.(); },
+        },
+        h(ListIcon, { size: 15 }),
+        h('span', { className: 'er-wordlist-label' }, t('reader.wordList')),
+        Object.keys(vocabEntries).length > 0
+          ? h('span', { className: 'er-wordlist-count' }, String(Object.keys(vocabEntries).length))
+          : null,
+      ),
     ),
     h(
       'div',
@@ -2173,7 +2651,7 @@ export function ReaderView({
           key: entry.key,
           type: 'button',
           className: `er-toc-row${entry.unitIndex === currentParagraphFirstUnit ? ' is-current' : ''}`,
-          onClick: () => { setTocOpen(false); onIndexChange(entry.unitIndex); },
+          onClick: () => { setTocOpen(false); goTo(entry.unitIndex); },
         },
         h(
           'span',
@@ -2647,6 +3125,139 @@ export function ReaderView({
     ),
   );
 
+  // The playback options: the range the read-aloud covers, the repeats, and
+  // the clock that stops it.
+  //
+  // The wrapper carries the position and the little foot that points at the
+  // button; the panel inside it carries the surface and does the scrolling.
+  const renderPlayPanel = () => h(
+    'div',
+    { className: 'er-play-pop', style: playPanelStyle, ref: playPanelRef },
+    h(
+      'div',
+      { className: 'er-play-panel' },
+      h(
+        'div',
+        { className: 'er-play-panel-head' },
+        h('span', { className: 'er-play-title' }, t('reader.playPanelTitle')),
+        h(
+          'button',
+          {
+            type: 'button',
+            title: t('reader.playPanelClose'),
+            'aria-label': t('reader.playPanelClose'),
+            onClick: () => { setPlayPanelOpen(false); },
+          },
+          h(CloseIcon, { size: 14 }),
+        ),
+      ),
+      h(
+        'div',
+        { className: 'er-play-caption' },
+        h('span', { className: 'er-play-caption-label' }, t('reader.playRange')),
+        playSegmentNote === ''
+          ? null
+          : h('span', { className: 'er-play-caption-note' }, playSegmentNote),
+      ),
+      h(
+        'div',
+        { className: 'er-play-segment' },
+        [
+          ['paragraph', t('reader.playRangeParagraph')],
+          ['chapter', t('reader.playRangeChapter')],
+          ['book', t('reader.playRangeBook')],
+        ].map(([key, label]) => h(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'er-play-segment-item',
+            'aria-pressed': playbackSettings.scope === key,
+            onClick: () => { updatePlaybackSettings({ scope: key }); },
+          },
+          label,
+        )),
+      ),
+      h(
+        'div',
+        { className: 'er-play-rows' },
+        h(
+          'div',
+          { className: 'er-play-row' },
+          h('span', { className: 'er-play-label' }, t('reader.playLoop')),
+          h(
+            'button',
+            {
+              type: 'button',
+              role: 'switch',
+              className: 'er-switch',
+              'aria-checked': playbackSettings.loop,
+              'aria-label': t('reader.playLoop'),
+              onClick: () => { updatePlaybackSettings({ loop: !playbackSettings.loop }); },
+            },
+          ),
+        ),
+        h(
+          'div',
+          { className: `er-play-row${playbackSettings.loop ? '' : ' is-disabled'}` },
+          h('span', { className: 'er-play-label' }, t('reader.playLoopCount')),
+          h(
+            'select',
+            {
+              className: 'er-play-select',
+              value: String(playbackSettings.loopCount),
+              disabled: !playbackSettings.loop,
+              'aria-label': t('reader.playLoopCount'),
+              onChange: (event) => { updatePlaybackSettings({ loopCount: Number(event.target.value) }); },
+            },
+            LOOP_COUNTS.map((count) => h(
+              'option',
+              { key: count, value: String(count) },
+              count === 0 ? t('reader.playLoopForever') : t('reader.playLoopTimes', { n: count }),
+            )),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'er-play-row' },
+          h('span', { className: 'er-play-label' }, t('reader.playLimit')),
+          h(
+            'select',
+            {
+              className: 'er-play-select',
+              value: String(playbackSettings.limitMinutes),
+              'aria-label': t('reader.playLimit'),
+              onChange: (event) => { updatePlaybackSettings({ limitMinutes: Number(event.target.value) }); },
+            },
+            LIMIT_MINUTES.map((minutes) => h(
+              'option',
+              { key: minutes, value: String(minutes) },
+              minutes === 0 ? t('reader.playLimitOff') : t('reader.playLimitMinutes', { n: minutes }),
+            )),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'er-play-row' },
+          h('span', { className: 'er-play-label' }, t('reader.playAuto')),
+          h(
+            'button',
+            {
+              type: 'button',
+              role: 'switch',
+              className: 'er-switch',
+              'aria-checked': playbackSettings.autoPlay,
+              'aria-label': t('reader.playAuto'),
+              title: t('reader.playAutoHint'),
+              onClick: () => { updatePlaybackSettings({ autoPlay: !playbackSettings.autoPlay }); },
+            },
+          ),
+        ),
+      ),
+      h('div', { className: 'er-play-hint' }, playSummary),
+    ),
+  );
+
   const renderFoot = () => h(
     'div',
     { className: 'er-read-foot' },
@@ -2680,16 +3291,24 @@ export function ReaderView({
         h(NextIcon, { size: 14 }),
       ),
       h(
-        'button',
-        {
-          type: 'button',
-          className: 'er-round-icon',
-          title: t('reader.repeat'),
-          'aria-pressed': repeat,
-          onClick: () => { setRepeat((value) => !value); },
-        },
-        h(RepeatIcon, { size: 16 }),
+        'div',
+        { className: 'er-play-anchor' },
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'er-round-icon',
+            ref: playAnchorRef,
+            title: t('reader.playRangeButton'),
+            'aria-label': t('reader.playRangeButton'),
+            'aria-expanded': playPanelOpen,
+            onClick: togglePlayPanel,
+          },
+          h(RepeatIcon, { size: 16 }),
+          h('span', { className: 'er-play-badge' }, playBadge),
+        ),
       ),
+      floating(playPanelOpen ? renderPlayPanel() : null),
     ),
     h(
       'div',
@@ -2889,7 +3508,7 @@ export function ReaderView({
         quote: unit.text ?? '',
         unitIndex: index,
         onClose: () => { setNotesOpen(false); },
-        onJump: (target) => { onIndexChange(target); },
+        onJump: (target) => { goTo(target); },
         onChanged: () => { setNotesVersion((value) => value + 1); },
       })
       : null,

@@ -10,12 +10,13 @@
  *   - it is the fallback while the Host has no shelf yet, so a page that was
  *     refreshed before the application was restarted keeps working.
  *
- * The database is the one the learner already has: same name, same version,
- * same upgrade block, so the existing books open without data loss.
+ * The database is the one the learner already has: same name, and the upgrade
+ * block adds what a newer build needs without touching what is already there.
+ * So the existing books open without data loss.
  */
 
 const DB_NAME = 'english-reader';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 /** The book shelf shares the database with the lists below. */
 export const BOOKS_STORE_NAME = 'books';
 /** The vocabulary list shares the database with the shelf. */
@@ -24,6 +25,8 @@ export const VOCAB_STORE_NAME = 'vocabulary';
 export const NOTES_STORE_NAME = 'notes';
 /** The podcast scripts share it as well. */
 export const PODCAST_STORE_NAME = 'podcasts';
+/** The synthesised speech shares it as well. */
+export const AUDIO_STORE_NAME = 'audio';
 
 /**
  * @typedef {object} BookRecord
@@ -69,6 +72,11 @@ function openDatabase() {
         const podcasts = db.createObjectStore(PODCAST_STORE_NAME, { keyPath: 'id' });
         // The episodes of one book are read together.
         podcasts.createIndex('bookId', 'bookId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(AUDIO_STORE_NAME)) {
+        const audio = db.createObjectStore(AUDIO_STORE_NAME, { keyPath: 'key' });
+        // The oldest clips are found when the cache has to make room.
+        audio.createIndex('createdAt', 'createdAt', { unique: false });
       }
     };
     request.onsuccess = () => {
@@ -194,6 +202,42 @@ export async function listNotes() {
  */
 export async function listPodcasts() {
   return (await withStore('readonly', (store) => store.getAll(), PODCAST_STORE_NAME)) ?? [];
+}
+
+/**
+ * Read one cached clip.
+ * @param {string} key
+ * @returns {Promise<object|undefined>}
+ */
+export async function getAudio(key) {
+  return withStore('readonly', (store) => store.get(key), AUDIO_STORE_NAME);
+}
+
+/**
+ * Every cached clip, oldest first.
+ * @returns {Promise<object[]>}
+ */
+export async function listAudio() {
+  const clips = await withStore('readonly', (store) => store.getAll(), AUDIO_STORE_NAME);
+  return (clips ?? []).sort((a, b) => (a?.createdAt ?? 0) - (b?.createdAt ?? 0));
+}
+
+/**
+ * Insert or replace one cached clip.
+ * @param {object} record
+ * @returns {Promise<void>}
+ */
+export async function saveAudio(record) {
+  await withStore('readwrite', (store) => store.put(record), AUDIO_STORE_NAME);
+}
+
+/**
+ * Remove one cached clip.
+ * @param {string} key
+ * @returns {Promise<void>}
+ */
+export async function deleteAudio(key) {
+  await withStore('readwrite', (store) => store.delete(key), AUDIO_STORE_NAME);
 }
 
 /**

@@ -6,6 +6,8 @@
  * always pronounceable — even without a key or without a network.
  */
 
+import { speakCached } from './tts-cache.js';
+
 /**
  * Play an audio source and wait until it ends.
  *
@@ -93,12 +95,20 @@ export async function speakWord(text, options = {}) {
 
 /**
  * The default call to the Host: the same route the reader uses.
+ *
+ * The clip goes through the cache, so a word that was pronounced once is not
+ * synthesised again.
+ *
  * @param {object} payload - the request.
  * @returns {Promise<object>} the audio.
  */
 async function defaultAskTts(payload) {
   const { askAi } = await import('./ai.js');
-  return askAi('tts', payload);
+  return speakCached(payload.text, {
+    voiceId: payload.voiceId,
+    rate: payload.rate,
+    ask: (request) => askAi('tts', request),
+  });
 }
 
 /**

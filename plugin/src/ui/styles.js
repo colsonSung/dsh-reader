@@ -10,14 +10,15 @@
  * appears in three places only: the primary action, the active state, and the
  * brass rail on the left edge of the reading column.
  *
- * The word card, the note editor and the modes panel float over the panel, so
- * they live outside the page root and carry the same token block with them.
+ * The word card, the note editor, the modes panel and the playback options
+ * float over the panel, so they live outside the page root and carry the same
+ * token block with them.
  */
 export const STYLE = `
 /* The reader's own surfaces and its one hue.
    The ramp mixes the host's base and label colours, so the four steps
    separate in both themes and still follow a host theme change. */
-.er-page,.er-wordcard,.er-note-editor,.er-modes-panel{
+.er-page,.er-wordcard,.er-note-editor,.er-modes-panel,.er-play-pop,.er-play-panel{
   --er-surface-0:var(--dsw-alias-bg-base);
   --er-surface-1:color-mix(in oklab,var(--dsw-alias-bg-base) 94%,var(--dsw-alias-label-primary) 6%);
   --er-surface-2:color-mix(in oklab,var(--dsw-alias-bg-base) 89%,var(--dsw-alias-label-primary) 11%);
@@ -65,7 +66,9 @@ export const STYLE = `
 body[data-ds-dark-theme] .er-page,
 body[data-ds-dark-theme] .er-wordcard,
 body[data-ds-dark-theme] .er-note-editor,
-body[data-ds-dark-theme] .er-modes-panel{
+body[data-ds-dark-theme] .er-modes-panel,
+body[data-ds-dark-theme] .er-play-pop,
+body[data-ds-dark-theme] .er-play-panel{
   --er-accent-base:#e0b558;
   --er-ink:#e6dfd0;
 }
@@ -187,14 +190,15 @@ body[data-ds-dark-theme] .er-modes-panel{
 .er-toggle{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary);cursor:pointer}
 .er-toggle input{accent-color:var(--er-accent)}
 .er-label{font-size:12px;color:var(--dsw-alias-label-tertiary)}
-.er-wordlist-button{display:inline-flex;align-items:center;gap:6px;flex:none;appearance:none;border:1px solid var(--er-line);border-radius:var(--dsw-radius-sm);padding:4px 10px;background:var(--er-surface-1);box-shadow:var(--er-shadow-card);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
-.er-wordlist-button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.er-wordlist-button{display:inline-flex;align-items:center;gap:6px;flex:none;appearance:none;border:1px solid var(--er-line);border-radius:var(--dsw-radius-sm);padding:6px 10px 6px 8px;background:var(--er-surface-1);box-shadow:var(--er-shadow-card),var(--er-edge);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1.4;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease,border-color var(--er-dur-hover) ease}
+.er-wordlist-button:hover{border-color:var(--er-line-strong);background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.er-wordlist-label{white-space:nowrap}
 /* The mind map and the podcast sit next to the vocabulary button. They are
    icon only: the bar is one line, and a label each would push the reading
    figures off the edge. */
 .er-read-extra{width:28px;height:28px;flex:none;color:var(--dsw-alias-label-secondary)}
 .er-read-extra:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
-.er-wordlist-count{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:var(--dsw-radius-sm);background:var(--er-accent);color:var(--er-on-accent);font-size:12px;line-height:1}
+.er-wordlist-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--er-accent);color:var(--er-on-accent);font-size:11px;line-height:1}
 .er-wordcard{position:fixed;z-index:1100;box-sizing:border-box;padding:16px 16px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);font-size:13px;color:var(--dsw-alias-label-primary)}
 .er-wordcard-head{display:flex;align-items:flex-start;gap:12px}
 .er-wordcard-word{flex:1;min-width:0;font-size:18px;font-weight:600;word-break:break-word}
@@ -420,9 +424,30 @@ body[data-ds-dark-theme] .er-modes-panel{
 .er-book-cover-small .er-book-menu{left:100%;right:auto;top:0;margin:0 0 0 8px}
 
 
-.er-read-bar{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;padding:12px 16px;border-bottom:1px solid var(--er-line);flex:none;white-space:nowrap;overflow:hidden}
-.er-read-title{min-width:0;max-width:34ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:0 1 auto;font-size:14px;font-weight:500;color:var(--dsw-alias-label-primary);letter-spacing:.01em}
-.er-read-stats{display:flex;align-items:center;gap:12px;margin-left:auto;flex:none}
+/* The read bar: three zones, separated by a hairline — the book you are
+   reading, the place you are in it, and what you can do from here. The book
+   is the heading, so it leads; the numbers about the book are the quietest. */
+.er-read-bar{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;padding:9px 16px;border-bottom:1px solid var(--er-line);flex:none;white-space:nowrap;overflow:hidden;container-type:inline-size}
+.er-read-head{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
+.er-read-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:550;color:var(--dsw-alias-label-primary);letter-spacing:.01em}
+.er-read-place{display:flex;align-items:center;gap:10px;min-width:0;flex:0 1 auto;padding-left:12px;border-left:1px solid var(--er-line)}
+.er-read-counter{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* The chapter picker is a chip, not a form field: it is a place in the book,
+   not a setting. */
+.er-read-chapter{appearance:none;-webkit-appearance:none;max-width:18ch;flex:none;padding:6px 26px 6px 10px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background-color:var(--er-surface-1);box-shadow:var(--er-shadow-card),var(--er-edge);background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 14px) 55%,calc(100% - 10px) 55%;background-size:4px 4px,4px 4px;background-repeat:no-repeat;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1.4;text-overflow:ellipsis;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease,border-color var(--er-dur-hover) ease}
+.er-read-chapter:hover{border-color:var(--er-line-strong);background-color:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.er-read-chapter:focus-visible{outline:var(--er-focus);outline-offset:1px}
+.er-read-chapter option{background:var(--er-surface-1);color:var(--dsw-alias-label-primary)}
+/* The actions: one row of round buttons, then the word list. */
+.er-read-actions{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto;padding-left:12px;border-left:1px solid var(--er-line)}
+.er-read-actions .er-round-icon{width:28px;height:28px}
+.er-read-stats{display:flex;align-items:center;gap:12px;flex:none;padding-left:14px;border-left:1px solid var(--er-line)}
+/* The bar answers to the width of the panel, not of the window: a narrow
+   sidebar must not squeeze the title into nothing. The numbers go first, then
+   the position. */
+@container (max-width: 1000px){.er-read-stats{display:none}}
+@container (max-width: 760px){.er-read-counter{display:none}}
+@container (max-width: 620px){.er-read-chapter{display:none}}
 .er-read-stat{font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
 .er-read-stat.is-learn{color:var(--dsw-alias-state-warn-primary)}
 .er-read-stat.is-known{color:var(--dsw-alias-state-success-primary)}
@@ -453,6 +478,60 @@ body[data-ds-dark-theme] .er-modes-panel{
 .er-round-icon[aria-pressed="true"]:hover{background:var(--er-accent);filter:brightness(.94);color:var(--er-on-accent)}
 .er-read-foot .er-btn-primary{display:inline-flex;align-items:center;gap:7px;border-radius:999px;padding:8px 16px 8px 13px}
 .er-read-position{font-size:12px;color:var(--dsw-alias-label-tertiary);margin-left:8px}
+/* The playback options. The panel is rendered into the document body and
+   placed by the script, the way the note editor and the modes panel are: the
+   reading column scrolls behind it, so a panel anchored to the button would be
+   cut off by the very scroll container it sits in. */
+.er-play-anchor{position:relative;display:inline-flex;align-items:center;gap:6px;flex:none}
+/* The trigger keeps its round shape until it has something to say: the badge
+   widens the disc into a pill. */
+.er-read-foot .er-play-anchor .er-round-icon,
+.er-read-foot .er-play-anchor .er-btn-icon{width:auto;min-width:32px;height:32px;padding:0 8px;gap:4px;border-radius:999px}
+.er-play-pop{position:fixed;z-index:1200;box-sizing:border-box;width:min(300px,calc(100vw - 32px));font-family:var(--dsw-font,inherit);font-size:13px;animation:er-play-panel-in var(--er-dur-pop) var(--er-ease)}
+/* The little foot that points at the button the panel belongs to. It sits on
+   the wrapper, not on the panel: the panel scrolls, and a scroll container
+   clips its own overflow. */
+.er-play-pop::after{content:'';position:absolute;bottom:-5px;left:var(--er-play-arrow,24px);width:10px;height:10px;transform:rotate(45deg);background:var(--er-overlay);border-right:1px solid var(--er-line);border-bottom:1px solid var(--er-line);border-radius:0 0 3px 0}
+.er-play-panel{position:relative;box-sizing:border-box;width:100%;max-height:min(70vh,420px);overflow:auto;padding:14px 16px 12px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);color:var(--dsw-alias-label-primary)}
+/* The panel fades in on its own: the script places it with an inline
+   transform, so the entrance must not move the panel itself. */
+@keyframes er-play-panel-in{from{opacity:0}to{opacity:1}}
+/* The head: the panel's own name, and the way out of it. */
+.er-play-panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:14px}
+.er-play-title{flex:1;min-width:0;font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.er-play-panel-head button{appearance:none;border:0;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;padding:4px 6px;border-radius:var(--dsw-radius-xs);font:inherit;font-size:13px;line-height:1;display:inline-flex;align-items:center}
+.er-play-panel-head button:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+/* A group caption: the name of the group on the left, a quiet note on the
+   right. */
+.er-play-caption{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:6px}
+.er-play-caption-label{font-size:12px;color:var(--dsw-alias-label-secondary)}
+.er-play-caption-note{font-size:11px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}
+/* The range: three choices, each one third of the width. The control sits on
+   a line of its own, so it can never crowd the caption out. */
+.er-play-segment{display:grid;grid-template-columns:repeat(3,1fr);gap:2px;padding:2px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-2);border:1px solid var(--er-line)}
+.er-play-segment-item{appearance:none;border:none;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:1.2;padding:6px 4px;border-radius:calc(var(--dsw-radius-sm) - 2px);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
+.er-play-segment-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.er-play-segment-item[aria-pressed="true"]{background:var(--er-accent);color:var(--er-on-accent);font-weight:500}
+.er-play-segment-item[aria-pressed="true"]:hover{background:var(--er-accent);filter:brightness(.94)}
+/* The rows of the settings: a fixed label column, so every control lines up on
+   the right edge whatever its own width. */
+.er-play-rows{display:flex;flex-direction:column;margin-top:12px}
+.er-play-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:30px}
+.er-play-label{flex:none;width:84px;font-size:13px;color:var(--dsw-alias-label-secondary)}
+.er-play-row.is-disabled .er-play-label{color:var(--dsw-alias-label-tertiary)}
+/* The selects are the selects of the toolbar, a size smaller: the panel is
+   narrow and the two of them share its rows. */
+.er-play-select{appearance:none;-webkit-appearance:none;flex:none;padding:5px 24px 5px 9px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background-color:var(--er-surface-1);box-shadow:var(--er-shadow-card),var(--er-edge);background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 12px) 52%,calc(100% - 7px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;width:124px;text-overflow:ellipsis;cursor:pointer;transition:border-color var(--er-dur-hover) ease,background-color var(--er-dur-hover) ease}
+.er-play-select:hover{border-color:var(--er-line-strong);background-color:var(--dsw-alias-interactive-bg-hover)}
+.er-play-select:focus-visible{outline:var(--er-focus);outline-offset:1px}
+.er-play-select:disabled{opacity:.45;cursor:default}
+.er-play-select:disabled:hover{border-color:var(--er-line);background-color:var(--er-surface-1)}
+.er-play-select option{background:var(--er-surface-1);color:var(--dsw-alias-label-primary)}
+/* The one line that says what the settings mean. */
+.er-play-hint{margin-top:12px;padding-top:10px;border-top:1px solid var(--er-line);font-size:12px;line-height:1.45;color:var(--dsw-alias-label-tertiary)}
+/* The badge sits inside the trigger, next to the glyph: it says what the
+   playback is doing without opening anything. */
+.er-play-badge{flex:none;font-size:10px;line-height:1;padding:2px 6px;border-radius:999px;background:var(--er-surface-2);color:var(--dsw-alias-label-secondary);white-space:nowrap}
 .er-word.is-hard{background:var(--er-accent-soft);border-radius:var(--dsw-radius-xs);padding:1px 2px}
 .er-hard-wrap{display:inline-flex;flex-direction:column;align-items:center;vertical-align:top}
 .er-hard-gloss{margin-top:2px;max-width:180px;font-size:12px;line-height:1.35;color:var(--dsw-alias-label-tertiary);text-align:center}
@@ -682,6 +761,8 @@ body[data-ds-dark-theme] .er-modes-panel{
 .er-read-foot .er-btn-icon:focus-visible,
 .er-round-icon:focus-visible,
 .er-switch:focus-visible,
+.er-play-segment-item:focus-visible,
+.er-play-panel-head button:focus-visible,
 .er-toggle input:focus-visible,
 .er-mode-row input:focus-visible{outline:var(--er-focus);outline-offset:1px}
 
@@ -697,14 +778,16 @@ body[data-ds-dark-theme] .er-modes-panel{
 .er-read-tool:active,
 .er-paragraph-action:active,
 .er-wordlist-button:active,
-.er-round-icon:active{transform:scale(.97)}
+.er-round-icon:active,
+.er-play-segment-item:active{transform:scale(.97)}
 
 /* The reduced-motion block: the durations go to zero, so nothing moves. */
 @media (prefers-reduced-motion:reduce){
   .er-page,.er-page *,
   .er-wordcard,.er-wordcard *,
   .er-note-editor,.er-note-editor *,
-  .er-modes-panel,.er-modes-panel *{
+  .er-modes-panel,.er-modes-panel *,
+  .er-play-panel,.er-play-panel *{
     animation-duration:0s!important;
     animation-iteration-count:1!important;
     transition-duration:0s!important;

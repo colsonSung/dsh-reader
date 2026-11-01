@@ -13,6 +13,8 @@
  * model: `llm`, `agentDefaultModel` and `timeoutMs`.
  */
 
+import { translationLanguageName } from '../lib/languages.js';
+
 /** The methods the client half may ask for. */
 export const AI_METHODS = Object.freeze(['word', 'translate', 'breakdown', 'mindmap', 'podcast', 'podcastReply']);
 
@@ -237,19 +239,34 @@ const SPECS = {
     maxTokens: 1200,
     /**
      * @param {any} payload - the client payload.
-     * @returns {{text: string}} the checked input.
+     * @returns {{text: string, target: string}} the checked input.
      */
     validate(payload) {
       const source = text(payload?.text);
       if (source === '') throw aiError('缺少要翻译的内容');
-      return { text: source };
+      // The target language is a name from the fixed list: nothing the page
+      // sends can put words of its own into the prompt.
+      return { text: source, target: translationLanguageName(payload?.target) };
     },
     /**
-     * @param {{text: string}} request - the checked input.
+     * @param {{text: string, target: string}} request - the checked input.
+     * @returns {string} the system prompt.
+     */
+    system(request) {
+      return [
+        '你是一名语言学习助手，负责把原文翻译成指定的语言。',
+        '只输出一个 JSON 对象：不要使用 Markdown 代码块，不要输出解释、前言或结尾语。',
+        'JSON 字段说明：',
+        `  text: 整段内容翻译成${request.target}之后的译文，保持原文的段落与顺序`,
+        '所有字段都必须出现。',
+      ].join('\n');
+    },
+    /**
+     * @param {{text: string, target: string}} request - the checked input.
      * @returns {string} the user prompt.
      */
     user(request) {
-      return `请翻译下面这段内容：\n${request.text}`;
+      return `请把下面这段内容翻译成${request.target}：\n${request.text}`;
     },
     /**
      * @param {any} raw - the model's JSON object.
@@ -602,7 +619,9 @@ export async function runAiMethod(method, payload, deps = {}) {
     controller.abort();
   }, timeoutMs);
 
-  const system = SYSTEM_PROMPTS[method];
+  // A method may build its own system prompt: the translation names the
+  // language the learner asked for.
+  const system = typeof spec.system === 'function' ? spec.system(request) : SYSTEM_PROMPTS[method];
   const user = spec.user(request);
   const call = { llm, provider, model, maxTokens: spec.maxTokens, user, signal: controller.signal };
   const answerWith = (finalSystem) => (useMinimax

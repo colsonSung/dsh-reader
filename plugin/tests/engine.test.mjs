@@ -5,7 +5,7 @@
  *   - segment.js：缩写切句、引号结尾、tokenize 偏移还原
  *   - match.js：diffTyping（正确 / 部分错 / 多打）、diffWords（缺词 / 多词 / 错词）、wordsPerMinute
  *   - tts.js：注入假 synth，断言 speak 会 cancel、rate clamp、缺 boundary 仍有 onWord 回调
- *   - sync.js：注入假 tts，断言「落后→pause」「领先超容差→cancel 并从目标词重读」
+ *   - sync.js：注入假 tts，断言「一次只读一个词」「换词→cancel 并读新词」
  *   - asr.js：注入假 recognition，断言 partial / final / 错误分支
  *
  * 运行：node --test tests/engine.test.mjs
@@ -432,53 +432,49 @@ test('tts: speakWord 朗读单个词', () => {
 
 // ------------------------------------------------------------------- sync.js
 
-test('sync: 用户落后于已读词 → 暂停朗读', () => {
+test('sync: 一次只读一个词，不是整句', () => {
   const tts = createFakeTts();
-  const driver = createSyncDriver({ tts, gapTolerance: 2 });
+  const driver = createSyncDriver({ tts });
   driver.setWords(['one', 'two', 'three', 'four', 'five', 'six']);
   driver.syncTo(0);
   assert.equal(tts.spoken.length, 1);
-  assert.equal(tts.spoken[0].text, 'one two three four five six');
-  // 朗读推进到第 3 个词
-  tts.spoken[0].handlers.onWord(2);
-  assert.equal(driver.getState().spokenIndex, 2);
-  // 用户只打到第 1 个词 → 落后 → 暂停
-  driver.syncTo(1);
-  assert.equal(tts.paused, 1);
-  assert.equal(driver.getState().paused, true);
-  // 用户追上后恢复
-  driver.syncTo(3);
-  assert.equal(tts.resumed, 1);
-  assert.equal(driver.getState().paused, false);
+  assert.equal(tts.spoken[0].text, 'one', '只读学习者正在写的那个词');
+  assert.equal(driver.getState().spokenIndex, 0);
+  assert.equal(driver.getState().playing, true);
 });
 
-test('sync: 用户领先超容差 → cancel 并从目标词重读', () => {
+test('sync: 换词 → cancel 当前朗读并读新词', () => {
   const tts = createFakeTts();
-  const driver = createSyncDriver({ tts, gapTolerance: 2 });
+  const driver = createSyncDriver({ tts });
   driver.setWords(['one', 'two', 'three', 'four', 'five', 'six']);
   driver.syncTo(0);
-  tts.spoken[0].handlers.onWord(0);
-  assert.equal(driver.getState().spokenIndex, 0);
   const cancelBefore = tts.cancelled;
-  driver.syncTo(5); // 领先 5 > 容差 2
+  driver.syncTo(3);
   assert.equal(tts.cancelled, cancelBefore + 1, '必须 cancel 当前朗读');
   assert.equal(tts.spoken.length, 2);
-  assert.equal(tts.spoken[1].text, 'six', '必须从目标词重新开始读');
-  assert.equal(driver.getState().spokenIndex, 5);
+  assert.equal(tts.spoken[1].text, 'four', '读的是新词');
+  assert.equal(driver.getState().spokenIndex, 3);
 });
 
-test('sync: 用户领先但未超容差 → 不做任何事', () => {
+test('sync: 同一个词不重复读', () => {
   const tts = createFakeTts();
-  const driver = createSyncDriver({ tts, gapTolerance: 2 });
-  driver.setWords(['one', 'two', 'three', 'four', 'five']);
+  const driver = createSyncDriver({ tts });
+  driver.setWords(['one', 'two', 'three']);
   driver.syncTo(0);
-  tts.spoken[0].handlers.onWord(0);
   const cancelBefore = tts.cancelled;
-  driver.syncTo(2); // 领先 2，未超过容差
-  assert.equal(tts.cancelled, cancelBefore, '未超容差时不能 cancel');
-  assert.equal(tts.spoken.length, 1);
-  assert.equal(tts.paused, 0);
-  assert.equal(driver.getState().spokenIndex, 0);
+  driver.syncTo(0);
+  assert.equal(tts.spoken.length, 1, '同一个词只读一遍');
+  assert.equal(tts.cancelled, cancelBefore, '不打断正在读的这个词');
+});
+
+test('sync: repeat 再说一遍当前这个词', () => {
+  const tts = createFakeTts();
+  const driver = createSyncDriver({ tts });
+  driver.setWords(['one', 'two', 'three']);
+  driver.syncTo(1);
+  driver.repeat();
+  assert.equal(tts.spoken.length, 2);
+  assert.equal(tts.spoken[1].text, 'two', '再说一遍同一个词');
 });
 
 test('sync: setWords 会复位内部状态，stop 会停止并复位', () => {
@@ -486,15 +482,15 @@ test('sync: setWords 会复位内部状态，stop 会停止并复位', () => {
   const driver = createSyncDriver({ tts });
   driver.setWords(['one', 'two']);
   driver.syncTo(0);
-  tts.spoken[0].handlers.onWord(1);
-  assert.equal(driver.getState().spokenIndex, 1);
+  tts.spoken[0].handlers.onWord(0);
+  assert.equal(driver.getState().spokenIndex, 0);
   assert.equal(driver.getState().playing, true);
   driver.setWords(['three', 'four']);
   assert.equal(driver.getState().spokenIndex, -1);
   assert.equal(driver.getState().playing, false);
   driver.syncTo(0);
   assert.equal(tts.spoken.length, 2);
-  assert.equal(tts.spoken[1].text, 'three four');
+  assert.equal(tts.spoken[1].text, 'three', '换句之后读的是新句的第一个词');
   driver.stop();
   assert.equal(driver.getState().playing, false);
   assert.equal(driver.getState().spokenIndex, -1);
@@ -507,7 +503,7 @@ test('sync: onWordSpoken 回传绝对词下标', () => {
   driver.setWords(['one', 'two', 'three', 'four', 'five']);
   driver.syncTo(0);
   tts.spoken[0].handlers.onWord(0);
-  driver.syncTo(4); // 超容差 → 从第 4 个词重读
+  driver.syncTo(4);
   tts.spoken[1].handlers.onWord(0);
   assert.deepEqual(seen, [0, 4]);
 });

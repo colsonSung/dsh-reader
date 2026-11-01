@@ -179,7 +179,7 @@ export function ClozeIcon(props) {
     children: [
       h('path', { key: 'a', d: 'M2.4 11.2h11.2' }),
       h('path', { key: 'b', d: 'M4.4 7.4h7.2' }),
-      h('path', { key: 'c', d: 'M2.4 3.6h11.2', 'stroke-dasharray': '2.4 2.2' }),
+      h('path', { key: 'c', d: 'M2.4 3.6h11.2', strokeDasharray: '2.4 2.2' }),
     ],
   });
 }
@@ -241,8 +241,8 @@ export function ExitIcon(props) {
   return glyph({
     ...props,
     children: [
-      h('path', { key: 'a', d: 'M6.4 3.4 2.6 8l3.8 4.6' }),
-      h('path', { key: 'b', d: 'M2.6 8h10.8' }),
+      h('path', { key: 'a', d: 'M13 8H3.4' }),
+      h('path', { key: 'b', d: 'M7.2 4.2 3.4 8l3.8 3.8' }),
     ],
   });
 }
@@ -263,11 +263,11 @@ export function MindMapIcon(props) {
   return glyph({
     ...props,
     children: [
-      h('path', { key: 'a', d: 'M6.3 6.5 3.4 4.4M6.3 8H3.4M6.3 9.5l-2.9 2.1' }),
-      h('circle', { key: 'b', cx: 7.8, cy: 8, r: 1.7 }),
-      h('circle', { key: 'c', cx: 2.6, cy: 3.7, r: 1.2 }),
-      h('circle', { key: 'd', cx: 2.6, cy: 8, r: 1.2 }),
-      h('circle', { key: 'e', cx: 2.6, cy: 12.3, r: 1.2 }),
+      h('path', { key: 'a', d: 'M6.7 7 4.2 4.9M6.5 8H4.3M6.7 9l-2.5 2.1' }),
+      h('circle', { key: 'b', cx: 8.3, cy: 8, r: 1.6 }),
+      h('circle', { key: 'c', cx: 2.7, cy: 3.8, r: 1.1 }),
+      h('circle', { key: 'd', cx: 2.7, cy: 8, r: 1.1 }),
+      h('circle', { key: 'e', cx: 2.7, cy: 12.2, r: 1.1 }),
     ],
   });
 }
@@ -277,9 +277,9 @@ export function PodcastIcon(props) {
   return glyph({
     ...props,
     children: [
-      h('path', { key: 'a', d: 'M3.2 10.4V9a4.8 4.8 0 0 1 9.6 0v1.4' }),
-      h('path', { key: 'b', d: 'M3.2 10.4h1.3a.9.9 0 0 1 .9.9v1.9a.9.9 0 0 1-.9.9H3.9a.7.7 0 0 1-.7-.7z' }),
-      h('path', { key: 'c', d: 'M12.8 10.4h-1.3a.9.9 0 0 0-.9.9v1.9a.9.9 0 0 0 .9.9h.6a.7.7 0 0 0 .7-.7z' }),
+      h('path', { key: 'a', d: 'M3.4 9.4V8a4.6 4.6 0 0 1 9.2 0v1.4' }),
+      h('rect', { key: 'b', x: 2.5, y: 9.2, width: 2.8, height: 4.4, rx: 1.2 }),
+      h('rect', { key: 'c', x: 10.7, y: 9.2, width: 2.8, height: 4.4, rx: 1.2 }),
     ],
   });
 }
@@ -355,8 +355,8 @@ export function NoteIcon(props) {
   return glyph({
     ...props,
     children: [
-      h('path', { key: 'a', d: 'M3.4 2.6h9.2v10.8l-3 2H3.4z' }),
-      h('path', { key: 'b', d: 'M5.8 6h4.4M5.8 9h4.4M5.8 12h2.6' }),
+      h('path', { key: 'a', d: 'M4.4 2.9h7.2v10.2H4.4z' }),
+      h('path', { key: 'b', d: 'M6.5 6.3h3M6.5 9h3M6.5 11.7h1.8' }),
     ],
   });
 }

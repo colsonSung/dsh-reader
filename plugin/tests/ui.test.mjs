@@ -64,7 +64,11 @@ function createContext() {
 }
 
 /** The translator used by the tests: the key itself is enough to assert on. */
-const t = (key) => (key === 'reader.position' ? 'Paragraph {p}/{pt} · Sentence {s}/{st}' : key)
+const t = (key) => {
+  if (key === 'reader.position') return 'Paragraph {p}/{pt} · Sentence {s}/{st}'
+  if (key === 'reader.positionShort') return '{p}/{pt} · {s}/{st}'
+  return key
+}
 
 /** Type a value into a controlled field the way a learner would. */
 async function typeInto(field, value) {
@@ -264,8 +268,12 @@ test('the reader shows the whole paragraph and marks the active sentence', async
   assert.equal(container.querySelectorAll('.er-page-paragraph').length, 2)
   assert.equal(container.querySelectorAll('.er-page-paragraph.is-active').length, 1)
 
-  // The counter names the paragraph and the sentence inside it.
-  assert.match(container.querySelector('.er-counter').textContent, /Paragraph 1\/2 · Sentence 1\/3/)
+  // The counter names the paragraph and the sentence inside it. The bar shows
+  // the short form and keeps the long one for the tooltip.
+  const counter = container.querySelector('.er-read-counter')
+  assert.ok(counter !== null, 'the bar carries the position')
+  assert.match(counter.textContent, /1\/2 · 1\/3/)
+  assert.match(counter.getAttribute('title'), /Paragraph 1\/2 · Sentence 1\/3/)
 
   // The sentences outside the active one are context, not target.
   assert.equal(container.querySelectorAll('.er-word.is-muted').length, 10)
@@ -695,6 +703,60 @@ test('every paragraph carries a note button, and the note is kept', async () => 
   await act(async () => { root.unmount() })
 })
 
+test('翻译语言可以选，翻译请求带着目标语言', async (t) => {
+  const { ReaderView } = await import('../src/ui/reader.js')
+  const units = paragraphUnits()
+  const container = dom.window.document.createElement('div')
+  dom.window.document.body.appendChild(container)
+  const root = ReactDOM.createRoot(container)
+  const requests = []
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  globalThis.fetch = async (url, options) => {
+    const request = JSON.parse(options.body);
+    requests.push(request);
+    return { status: 200, json: async () => ({ ok: true, result: { text: 'こんにちは' } }) };
+  }
+
+  await act(async () => {
+    root.render(React.createElement(ReaderView, {
+      t: (key) => key,
+      book: { id: 'b1', title: 'Test Book' },
+      units,
+      index: 0,
+      onIndexChange: () => {},
+    }))
+  })
+
+  // The settings carry the language the translation is made in.
+  const opener = container.querySelector('button[title="reader.toolSettings"]')
+  assert.ok(opener, 'the settings button must exist')
+  await act(async () => { opener.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+
+  const picker = dom.window.document.querySelector('.er-settings select')
+  assert.ok(picker, 'the settings must offer the translation language')
+  const offered = [...picker.querySelectorAll('option')].map((option) => option.value)
+  assert.ok(offered.includes('ja'), 'Japanese must be offered')
+  assert.ok(offered.includes('zh'), 'Chinese must be offered')
+  assert.equal(picker.value, 'zh', 'Chinese is the default')
+
+  await act(async () => {
+    picker.value = 'ja'
+    picker.dispatchEvent(new dom.window.Event('change', { bubbles: true }))
+  })
+
+  // The translation asks for that language.
+  const row = container.querySelector('.er-paragraph-row')
+  const buttons = row.querySelectorAll('.er-paragraph-action')
+  await act(async () => { buttons[1].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => {})
+  const request = requests.find((entry) => entry.method === 'translate')
+  assert.ok(request, 'the paragraph must be translated')
+  assert.equal(request.payload.target, 'ja', 'the request names the target language')
+
+  await act(async () => { root.unmount() })
+})
+
 test('段落右侧的翻译按钮只翻这一段，朗读按钮只读这一段', async (t) => {
   const { ReaderView } = await import('../src/ui/reader.js')
   const units = paragraphUnits()
@@ -760,15 +822,23 @@ test('阅读条上挂着思维导图与音频播客两个入口', async () => {
     }))
   })
 
-  // The two buttons sit right after the vocabulary button.
+  // The bar has three zones: the book, the place, the actions. The mind map
+  // and the podcast hang in the action group, next to each other.
   const bar = container.querySelector('.er-read-bar')
   const buttons = [...bar.querySelectorAll('button')]
   const wordListAt = buttons.findIndex((button) => button.classList.contains('er-wordlist-button'))
   const mindMapAt = buttons.findIndex((button) => button.getAttribute('aria-label') === 'mindmap.open')
   const podcastAt = buttons.findIndex((button) => button.getAttribute('aria-label') === 'podcast.open')
   assert.ok(wordListAt >= 0, 'the vocabulary button must be in the read bar')
-  assert.ok(mindMapAt > wordListAt, 'the mind map button sits to the right of the vocabulary button')
-  assert.ok(podcastAt > mindMapAt, 'the podcast button sits next to the mind map button')
+  assert.ok(mindMapAt >= 0, 'the mind map button must be in the read bar')
+  assert.ok(podcastAt >= 0, 'the podcast button must be in the read bar')
+  assert.equal(podcastAt - mindMapAt, 1, 'the podcast button sits next to the mind map button')
+  assert.ok(wordListAt > podcastAt, 'the vocabulary button closes the action group')
+  // The book leads the bar, and the chapter is a chip of its own.
+  const title = bar.querySelector('.er-read-title')
+  assert.ok(title !== null, 'the bar names the book')
+  assert.equal(title.textContent, 'Test Book')
+  assert.ok(bar.querySelector('.er-read-chapter') !== null, 'the chapter is a chip')
 
   // The mind map opens its own panel. The model is not reachable in the test,
   // so the panel shows the failure instead of a drawing.
