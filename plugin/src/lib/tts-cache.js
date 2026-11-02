@@ -306,8 +306,10 @@ async function makeClip(text, context, options) {
     bytes: byteLength(url),
   };
   // A cache that was cleared while the clip was on its way does not fill up again.
-  if (epoch === started) memory.set(key, record);
-  await writeStored(record, options);
+  if (epoch === started) {
+    memory.set(key, record);
+    await writeStored(record, options);
+  }
   return { record, cached: false };
 }
 
