@@ -171,12 +171,14 @@ export async function parsePdf(arrayBuffer, options = {}) {
   let pdfjs;
   try {
     pdfjs = await loader('./client.pdf.js');
-  } catch {
-    throw new Error(UNAVAILABLE_MESSAGE);
+  } catch (error) {
+    // The reason belongs in the message: a missing chunk, a refused request
+    // and a broken loader look the same from the outside otherwise.
+    throw new Error(`${UNAVAILABLE_MESSAGE}（${errorMessage(error)}）`);
   }
   const getDocument = resolveGetDocument(pdfjs);
   if (!getDocument) {
-    throw new Error(UNAVAILABLE_MESSAGE);
+    throw new Error(`${UNAVAILABLE_MESSAGE}（chunk 里没有 getDocument）`);
   }
 
   // pdf.js insists on a plain Uint8Array: a Node `Buffer` is a Uint8Array

@@ -287,6 +287,25 @@ export function createRecorder(options);
 export async function loadChunk(path, timeoutMs = 20000);
 ```
 
+### chunk 的加载契约（已核实）
+
+pdf.js 太大，不能打进主 bundle，它以**同级 chunk** 的形式单独发布。Harness 的
+client-module 系统**支持**这种同级 chunk，所以 PDF 不需要上游改动：
+
+| 环节 | 约定 |
+| --- | --- |
+| 文件 | `client.pdf.js` 必须和 `client.js` 在**同一个目录**（宿主按入口 bundle 的目录提供同级 chunk） |
+| 注册 | chunk 自己执行 `window.__ModuleLoader__.load({ id: "<包名>", chunk: "client.pdf.js", factory })`；`id` 必须和 `package.json` 的 `name` 一致，`chunk` 必须等于文件名 |
+| 取用 | 插件调用 `require.async('./client.pdf.js')`；外壳把 `./<file>` 解析成 `/plugins/<包名>/<file>?rev=<rev>`，并按这个 URL 精确匹配（**少了 `rev` 就是 404**） |
+| 命名 | 外壳只接受 `client.<name>.js` 这种形状的同级 chunk |
+
+踩过的坑：用 `/plugins/??<包名>/client.pdf.js` 这种组合 URL 去探活，必然 404，
+但那只是探活地址写错了，不能据此判断外壳不支持同级 chunk。正确的地址是
+`/plugins/<包名>/client.pdf.js?rev=<rev>`。
+
+回归由 `tests/chunk.test.mjs` 把守：它检查文件名、注册形状、包名一致性，以及
+解析层请求的相对路径就是 `./client.pdf.js`。
+
 ---
 
 ## 4. 硬性工程约束

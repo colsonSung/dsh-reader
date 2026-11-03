@@ -354,11 +354,12 @@ async function loadPdfDocument(bytes) {
   let pdfjs = null;
   try {
     pdfjs = await loadChunk('./client.pdf.js');
-  } catch {
-    throw new Error('PDF 预览暂不可用，请改用 EPUB 或 TXT');
+  } catch (error) {
+    // 把原因带出去：chunk 没取到、请求被拒、loader 坏了，从外面看都是同一句话。
+    throw new Error(`PDF 预览暂不可用，请改用 EPUB 或 TXT（${messageOf(error)}）`);
   }
   const getDocument = resolveGetDocument(pdfjs);
-  if (!getDocument) throw new Error('PDF 预览暂不可用，请改用 EPUB 或 TXT');
+  if (!getDocument) throw new Error('PDF 预览暂不可用，请改用 EPUB 或 TXT（chunk 里没有 getDocument）');
   let document = null;
   try {
     // pdf.js 要一个干净的 Uint8Array：Node 的 Buffer 是它的子类，会被拒掉。
