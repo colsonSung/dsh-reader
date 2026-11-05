@@ -15,6 +15,28 @@ import { formatBytes } from '../lib/source-file.js';
 import { getBook } from '../lib/store.js';
 
 /**
+ * Read a label. The translator returns the key itself when the dictionary
+ * has no entry, so the Chinese fallback is used in that case as well.
+ *
+ * A key that has not been added to the dictionary yet must not leak into the
+ * interface as raw text, and it must not blank the line either.
+ *
+ * @param {Function} t - the translator
+ * @param {string} key
+ * @param {string} fallback - the Chinese label
+ * @returns {string}
+ */
+export function label(t, key, fallback) {
+  try {
+    const value = typeof t === 'function' ? t(key) : undefined;
+    if (typeof value === 'string' && value.trim() !== '' && value !== key) return value;
+  } catch {
+    // The dictionary is not registered yet; the fallback carries the meaning.
+  }
+  return fallback;
+}
+
+/**
  * A human duration, split into minutes and seconds.
  * @param {number} ms
  * @returns {{ minutes: string, seconds: string }}
@@ -262,14 +284,21 @@ export function LibraryView({
   // carry any: the one book is fetched when the window opens, not the whole
   // shelf.
   const [frequency, setFrequency] = useState(null);
+  // A book whose text could not be read is not a book without text, so the
+  // two cases are kept apart.
+  const [frequencyFailed, setFrequencyFailed] = useState(false);
 
   const showFrequency = (book) => {
     setMenuFor(null);
     setModal({ kind: 'frequency', book });
     setFrequency(null);
+    setFrequencyFailed(false);
     getBook(book.id)
       .then((full) => { setFrequency(wordFrequency(full?.chapters ?? [], 40)); })
-      .catch(() => { setFrequency([]); });
+      .catch(() => {
+        setFrequencyFailed(true);
+        setFrequency([]);
+      });
   };
 
   const showDetails = (book) => {
@@ -514,15 +543,26 @@ export function LibraryView({
           { className: 'er-frequency' },
           frequency === null
             ? h('div', { className: 'er-empty-hint' }, t('library.loading'))
-            : words.length === 0
-              ? h('div', { className: 'er-empty-hint' }, t('library.frequencyEmpty'))
-              : words.map((entry) => h(
+            : frequencyFailed
+              ? h(
                 'div',
-                { key: entry.word, className: 'er-frequency-row' },
-                h('span', { className: 'er-frequency-word' }, entry.word),
-                h('span', { className: 'er-frequency-bar' }, h('span', { style: { width: `${Math.round((entry.count / max) * 100)}%` } })),
-                h('span', { className: 'er-frequency-count' }, String(entry.count)),
-              )),
+                { className: 'er-frequency-error' },
+                h(
+                  'div',
+                  { className: 'er-state' },
+                  h('div', { className: 'er-state-title' }, label(t, 'library.frequencyFailed', '无法加载词频统计。')),
+                  h('div', { className: 'er-state-hint' }, label(t, 'library.frequencyFailedHint', '无法读取这本书的正文。请关闭此窗口后重试。')),
+                ),
+              )
+              : words.length === 0
+                ? h('div', { className: 'er-empty-hint' }, t('library.frequencyEmpty'))
+                : words.map((entry) => h(
+                  'div',
+                  { key: entry.word, className: 'er-frequency-row' },
+                  h('span', { className: 'er-frequency-word' }, entry.word),
+                  h('span', { className: 'er-frequency-bar' }, h('span', { style: { width: `${Math.round((entry.count / max) * 100)}%` } })),
+                  h('span', { className: 'er-frequency-count' }, String(entry.count)),
+                )),
         ),
       );
     }

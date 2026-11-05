@@ -83,6 +83,15 @@ const VIEW_KEY = 'reader:library-view';
 const MIN_IMPORT_VISIBLE_MS = 700;
 
 /**
+ * How long the card keeps the outcome of a failed import.
+ *
+ * The card is a toast over the shelf: it must not stay there long, but the
+ * counts of a failed import have to be readable. The per-file report stays
+ * in the shelf, so the card only needs to be seen once.
+ */
+const IMPORT_RESULT_VISIBLE_MS = 5000;
+
+/**
  * Read the stored shelf view mode.
  * @returns {'grid'|'list'}
  */
@@ -92,6 +101,20 @@ function loadView() {
   } catch {
     return 'grid';
   }
+}
+
+/**
+ * Fill `{name}` placeholders in a locale string. The locale service has no
+ * interpolation of its own, so the plugin does it here.
+ * @param {string} template
+ * @param {Record<string, number|string>} values
+ * @returns {string}
+ */
+function format(template, values) {
+  return Object.entries(values).reduce(
+    (text, [key, value]) => text.replaceAll(`{${key}}`, String(value)),
+    template,
+  );
 }
 
 /**
@@ -107,6 +130,15 @@ export function EnglishReaderPage({ t, build }) {
   const [units, setUnits] = useState([]);
   const [index, setIndex] = useState(0);
   const [importProgress, setImportProgress] = useState(null);
+  // The outcome of an import that did not go through. The card carries it
+  // for a moment; the shelf carries the per-file report.
+  const [importCardResult, setImportCardResult] = useState(null);
+  // The per-file report of a failed import. It stays in the shelf until the
+  // next import or until the learner opens a book.
+  const [importReport, setImportReport] = useState(null);
+  // The book that is being opened. Its text is fetched when the learner
+  // opens it, and the panel has to say what is going on while it travels.
+  const [opening, setOpening] = useState(null);
   const [error, setError] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [wordListOpen, setWordListOpen] = useState(false);
@@ -121,6 +153,7 @@ export function EnglishReaderPage({ t, build }) {
   const saveTimer = useRef(null);
   const importStartedAt = useRef(0);
   const importHideTimer = useRef(null);
+  const importResultTimer = useRef(null);
   // The covers that still have to be shrunk, and the ones that are being
   // shrunk right now.
   const coverQueue = useRef([]);
@@ -314,6 +347,7 @@ export function EnglishReaderPage({ t, build }) {
 
   useEffect(() => () => {
     if (importHideTimer.current !== null) window.clearTimeout(importHideTimer.current);
+    if (importResultTimer.current !== null) window.clearTimeout(importResultTimer.current);
   }, []);
 
   // The progress of one file. The stages are reported as they happen, and the
@@ -382,16 +416,52 @@ export function EnglishReaderPage({ t, build }) {
     const list = Array.from(files ?? []);
     if (list.length === 0) return;
     setError('');
+    // A new import replaces the old report: the old one talks about files
+    // that are not in front of the learner any more.
+    setImportReport(null);
+    setImportCardResult(null);
     importStartedAt.current = Date.now();
     setImportProgress({ name: list[0]?.name ?? '', index: 0, total: list.length, stage: 'read', ratio: 0, detail: null });
     try {
-      const imported = [];
+      // One file that fails must not stop the others: the books that got in
+      // are already stored, so the learner has to see them.
+      const outcomes = [];
       for (let index = 0; index < list.length; index += 1) {
         const file = list[index];
         const report = makeReporter(file, index, list.length);
-        imported.push(await importOne(file, null, report));
+        try {
+          const entry = await importOne(file, null, report);
+          outcomes.push({ name: String(file?.name ?? ''), ok: true, entry });
+        } catch (fileError) {
+          outcomes.push({ name: String(file?.name ?? ''), ok: false, reason: fileError?.message ?? '' });
+        }
       }
+      // The shelf is read again either way: the books that were imported
+      // have to show up even when other files failed.
       await refresh();
+      const imported = outcomes.filter((outcome) => outcome.ok).map((outcome) => outcome.entry);
+      const failed = outcomes.filter((outcome) => !outcome.ok);
+      if (failed.length > 0) {
+        const report = {
+          okCount: imported.length,
+          failCount: failed.length,
+          allFailed: imported.length === 0,
+          failures: failed.map((outcome) => ({ name: outcome.name, reason: outcome.reason })),
+        };
+        setImportReport(report);
+        // The card carries the counts for a moment — but only when some books
+        // did get in. When nothing was imported the whole view becomes the
+        // error state, and a toast on top of it would say the same thing
+        // twice while covering the last row of the shelf.
+        if (!report.allFailed) {
+          setImportCardResult({ okCount: report.okCount, failCount: report.failCount, allFailed: report.allFailed });
+          if (importResultTimer.current !== null) window.clearTimeout(importResultTimer.current);
+          importResultTimer.current = window.setTimeout(() => {
+            importResultTimer.current = null;
+            setImportCardResult(null);
+          }, IMPORT_RESULT_VISIBLE_MS);
+        }
+      }
       // 书里没有自带封面的，让模型画一张；书先入库，封面随后补上
       for (const entry of imported) {
         if (entry === null || entry.hasRealCover) continue;
@@ -407,6 +477,8 @@ export function EnglishReaderPage({ t, build }) {
   // A book that came from the online source arrives with its catalogue entry.
   const onImported = useCallback(async (file, hit) => {
     setError('');
+    // The card carries the outcome of the last import; this one replaces it.
+    setImportCardResult(null);
     importStartedAt.current = Date.now();
     setImportProgress({ name: file?.name ?? hit?.title ?? '', index: 0, total: 1, stage: 'read', ratio: 0, detail: null });
     try {
@@ -428,14 +500,33 @@ export function EnglishReaderPage({ t, build }) {
   const openBook = useCallback(async (id) => {
     // The shelf list carries the metadata, not the text: the text of this one
     // book is fetched here, when the learner opens it.
-    const stored = await getBook(id);
-    if (stored === undefined) return;
+    //
+    // The read can fail — the Host does not answer, the record is gone, the
+    // file is damaged. Until the book is there the panel says so, and if it
+    // never comes the learner gets the reason and a way to try again.
+    setOpening({ id, phase: 'pending', reason: '' });
+    let stored = null;
+    try {
+      stored = await getBook(id);
+    } catch (openError) {
+      setOpening({ id, phase: 'error', reason: openError?.message ?? '' });
+      return;
+    }
+    if (stored === undefined) {
+      // The record is not there any more: the book cannot be opened at all.
+      setOpening({ id, phase: 'error', reason: '' });
+      return;
+    }
     const nextUnits = buildUnits(stored.chapters ?? []);
     const local = booksRef.current.find((entry) => entry.id === id);
     const progress = local?.progress ?? stored.progress;
     setUnits(nextUnits);
     setActiveBookId(id);
     setIndex(Math.min(Math.max(0, progress?.unitIndex ?? 0), Math.max(0, nextUnits.length - 1)));
+    setOpening(null);
+    // The report of the last import talks about files that are not in front
+    // of the learner any more.
+    setImportReport(null);
     setTab('reader');
     // The cover of this book may still be the full size of the model's
     // picture. It is shrunk in the background — the book opens right away,
@@ -542,6 +633,99 @@ export function EnglishReaderPage({ t, build }) {
 
   const pickFile = useCallback(() => { fileRef.current?.click(); }, []);
 
+  // One line of a failed import: the file, and what happened to it.
+  const failureLine = (failure) => (
+    failure.reason === '' ? failure.name : `${failure.name} — ${failure.reason}`
+  );
+
+  // The book that is opening.
+  //
+  // The shelf is replaced by the shape of the reader that is coming, and by
+  // the reason the book did not open. The learner is never left with an
+  // empty panel and no explanation.
+  const renderOpening = (state) => {
+    if (state.phase === 'error') {
+      // What happened — the file behind the book could not be read — and
+      // what to do next: the button is the same open, once more.
+      const why = state.reason === '' ? t('library.importFailed') : state.reason;
+      return h(
+        'div',
+        { className: 'er-state' },
+        h('div', { className: 'er-state-title' }, t('reader.bookFailed')),
+        h('div', { className: 'er-state-hint' }, `${why} ${t('reader.retry')}`),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'er-state-action',
+            onClick: () => { void openBook(state.id); },
+          },
+          t('reader.retry'),
+        ),
+      );
+    }
+    return h(
+      'div',
+      { className: 'er-skeleton', role: 'status', 'aria-label': t('reader.loadingBook') },
+      // The cover of the book that is opening.
+      h('div', { className: 'er-skeleton-block' }),
+      // The read bar.
+      h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '32%' } }),
+      // The first paragraph.
+      h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '94%' } }),
+      h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '86%' } }),
+      h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '91%' } }),
+      h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '58%' } }),
+    );
+  };
+
+  // The report of an import where some files made it and some did not.
+  //
+  // The report is a panel in the shelf and not a state of the whole panel:
+  // the books that were imported are right below it.
+  const renderImportPartial = (report) => h(
+    'div',
+    { className: 'er-partial' },
+    h('div', { className: 'er-partial-title' }, t('import.partialTitle')),
+    h(
+      'div',
+      { className: 'er-partial-list' },
+      report.failures.map((failure, index) => h(
+        'div',
+        { key: `${failure.name}-${index}`, className: 'er-partial-item is-fail' },
+        failureLine(failure),
+      )),
+    ),
+    h(
+      'div',
+      { className: 'er-partial-hint' },
+      `${format(t('import.partialOk'), { count: report.okCount })} · ${format(t('import.partialFail'), { count: report.failCount })}`,
+    ),
+  );
+
+  // Every file failed: there is no partial result to report, so the panel
+  // shows the error instead. The way forward is the same import again.
+  const renderImportFailed = (report) => h(
+    'div',
+    { className: 'er-state' },
+    h('div', { className: 'er-state-title' }, t('import.allFailed')),
+    h(
+      'div',
+      { className: 'er-state-hint' },
+      report.failures.map(failureLine).join(' · '),
+    ),
+    h(
+      'button',
+      { type: 'button', className: 'er-state-action', onClick: () => { pickFile(); } },
+      t('library.import'),
+    ),
+  );
+
+  // The two faces of a failed import: one that still brought books is a
+  // panel in the shelf, one that brought nothing takes over the view.
+  const partialReport = importReport !== null && importReport.allFailed === false ? importReport : null;
+  const failedReport = importReport !== null && importReport.allFailed === true ? importReport : null;
+
   if (!loaded) {
     return h('div', { className: 'er-page' }, h('div', { className: 'er-empty' }, t('library.loading')));
   }
@@ -556,7 +740,7 @@ export function EnglishReaderPage({ t, build }) {
     'div',
     {
       // The import card floats over the body, so the body gets room for it.
-      className: importProgress === null ? 'er-page' : 'er-page is-importing',
+      className: importProgress === null && importCardResult === null ? 'er-page' : 'er-page is-importing',
       onDragOver: (event) => { event.preventDefault(); },
       onDrop: (event) => {
         event.preventDefault();
@@ -593,7 +777,13 @@ export function EnglishReaderPage({ t, build }) {
             role: 'tab',
             className: 'er-segmented-item',
             'aria-selected': tab === section.id,
-            onClick: () => { setTab(section.id); },
+            onClick: () => {
+              setTab(section.id);
+              // A state that took over the view is left behind by leaving
+              // the view: nobody is stuck on a book that did not open.
+              setOpening(null);
+              if (failedReport !== null) setImportReport(null);
+            },
           },
           section.label,
         )),
@@ -649,8 +839,19 @@ export function EnglishReaderPage({ t, build }) {
     h(
       'div',
       { className: 'er-body' },
+      // The report of an import where some files made it and some did not.
+      // It sits at the top of the shelf, where the books that were imported
+      // are, and not in the card that floats over them. A book that is being
+      // opened takes the view over, so the report waits for it.
+      partialReport !== null && opening === null
+        ? renderImportPartial(partialReport)
+        : null,
       h(SectionBoundary, { t },
-        tab === 'library'
+        opening !== null
+        ? renderOpening(opening)
+        : failedReport !== null
+        ? renderImportFailed(failedReport)
+        : tab === 'library'
         ? h(LibraryView, {
           t,
           books: sorted,
@@ -732,8 +933,9 @@ export function EnglishReaderPage({ t, build }) {
         if (files.length > 0) void onFiles(files);
       },
     }),
-    // The import card: what is being imported, and how far it has come.
-    h(ImportCard, { t, progress: importProgress }),
+    // The import card: what is being imported, how far it has come, and what
+    // came of an import that did not go through.
+    h(ImportCard, { t, progress: importProgress, result: importCardResult }),
     wordListOpen
       ? h(WordList, {
         t,

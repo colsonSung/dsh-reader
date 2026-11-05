@@ -221,10 +221,23 @@ test('播放按钮一直都在，不靠悬停才出现', async () => {
 test('暗色主题下按钮也跟着换色：颜色全部来自主题变量', async () => {
   const background = declared('.er-cover-action', 'background').join('')
   const color = declared('.er-cover-action', 'color').join('')
-  assert.match(background, /var\(--dsw-alias-/, 'the disc takes a theme surface colour')
-  assert.match(color, /var\(--dsw-alias-/, 'the glyph takes a theme label colour')
+  assert.match(background, /var\(--er-surface-1/, 'the disc takes the reader surface token')
+  assert.match(color, /^var\(--er-ink-1\)$/, 'the glyph takes the reader ink token')
+  // The reader owns its tokens, so the theme is reached one indirection
+  // further down: the ink token is the host's label colour, and the dark
+  // theme redefines the surface token. Both must still be true, or the disc
+  // and its glyph would stop following the theme.
+  const ink = STYLE.match(/--er-ink-1:\s*([^;]+);/)
+  assert.ok(ink, 'the ink token is declared')
+  assert.match(ink[1], /var\(--dsw-alias-label-primary/, 'the ink token is the host label colour')
+  const dark = STYLE.match(/body\[data-ds-dark-theme\][^{]*\{[\s\S]*?--er-surface-1:\s*([^;]+);/)
+  assert.ok(dark, 'the dark theme redefines the surface token')
+  const light = STYLE.match(/\.er-page[^{]*\{[\s\S]*?--er-surface-1:\s*([^;]+);/)
+  assert.ok(light, 'the light theme declares the surface token')
+  assert.notEqual(dark[1].trim(), light[1].trim(), 'the dark surface is its own value')
   // A hardcoded light surface would vanish on a white cover in the dark theme.
   assert.ok(!/background:[^;]*#fff\b/i.test(background), 'no hardcoded white surface')
+  assert.ok(!/color:[^;]*#[0-9a-f]{3,8}\b/i.test(color), 'no hardcoded glyph colour')
 })
 
 test('点击播放按钮会开始朗读，但不会打开书', async () => {

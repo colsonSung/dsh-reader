@@ -52,10 +52,45 @@ function stageLabel(t, stage, detail) {
  * @param {Function} props.t - translator
  * @param {{ name?: string, index?: number, total?: number, stage?: string,
  *   ratio?: number, detail?: object | null } | null} props.progress
+ * @param {{ okCount?: number, failCount?: number, allFailed?: boolean } | null} props.result
+ *   - the outcome of an import that did not go through. The card carries only
+ *   the counts: the per-file report is too long for a toast that floats over
+ *   the shelf, so it lives in the shelf itself.
  * @returns {any} the element tree
  */
-export function ImportCard({ t, progress }) {
-  if (progress === null || progress === undefined) return null;
+export function ImportCard({ t, progress, result }) {
+  const failCount = Math.max(0, Number(result?.failCount ?? 0));
+  const okCount = Math.max(0, Number(result?.okCount ?? 0));
+  const failed = failCount > 0;
+  if ((progress === null || progress === undefined) && !failed) return null;
+
+  // The outcome of an import that did not go through.
+  //
+  // The card is a toast over the shelf: it stays small and it never lists
+  // the files. The learner gets the counts here and the per-file report in
+  // the shelf, where the books are.
+  if (failed) {
+    const allFailed = result?.allFailed === true;
+    const counts = allFailed
+      ? format(t('import.partialFail'), { count: failCount })
+      : `${format(t('import.partialOk'), { count: okCount })} · ${format(t('import.partialFail'), { count: failCount })}`;
+    return h(
+      'div',
+      { className: 'er-import', role: 'status', 'aria-live': 'polite' },
+      h(
+        'div',
+        { className: 'er-import-body' },
+        h(
+          'div',
+          { className: 'er-import-head' },
+          h('span', { className: 'er-import-label' }, allFailed ? t('import.allFailed') : t('import.partialTitle')),
+          h('span', { className: 'er-import-count' }, `${okCount} / ${okCount + failCount}`),
+        ),
+        h('div', { className: 'er-import-stage' }, counts),
+      ),
+    );
+  }
+
   const percent = progressPercent(progress);
   const total = Math.max(1, progress.total ?? 1);
   const index = Math.min(Math.max(0, progress.index ?? 0), total - 1);

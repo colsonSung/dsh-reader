@@ -12,6 +12,7 @@
  */
 import { createElement as h, useCallback, useEffect, useMemo, useState } from 'react';
 import { CloseIcon, SearchIcon, SoundIcon, TrashIcon } from './icons.js';
+import { label } from './library.js';
 import { dueEntries, listEntries, removeEntry, summarize, VOCAB_CHANGED_EVENT } from '../lib/vocab.js';
 import { speakWord } from '../lib/speech.js';
 
@@ -20,24 +21,6 @@ import { speakWord } from '../lib/speech.js';
 const RING_SIZE = 78;
 const RING_RADIUS = 33;
 const RING_CIRCUMFERENCE = 2 * Math.PI * RING_RADIUS;
-
-/**
- * Read a label. The translator returns the key itself when the dictionary
- * has no entry, so the Chinese fallback is used in that case as well.
- * @param {Function} t - the translator
- * @param {string} key
- * @param {string} fallback - the Chinese label
- * @returns {string}
- */
-function label(t, key, fallback) {
-  try {
-    const value = typeof t === 'function' ? t(key) : undefined;
-    if (typeof value === 'string' && value.trim() !== '' && value !== key) return value;
-  } catch {
-    // The dictionary is not registered yet; the fallback carries the meaning.
-  }
-  return fallback;
-}
 
 /**
  * Fill `{name}` placeholders in a locale string.
@@ -99,7 +82,12 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
   const [bucket, setBucket] = useState('all');
   const [query, setQuery] = useState('');
   const [note, setNote] = useState('');
-  const [loading, setLoading] = useState(false);
+  // The panel is drawn before the list has been read, so the first render has
+  // to be the loading state — an empty word list would claim there is
+  // nothing to show.
+  const [loading, setLoading] = useState(true);
+  // Whether the last read failed. An unread list is not an empty list.
+  const [failed, setFailed] = useState(false);
 
   /**
    * Read the list and the review queue.
@@ -112,8 +100,12 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
       setEntries(stored);
       setPending(await dueEntries());
       setNote('');
-    } catch (error) {
-      setNote(error?.message ?? label(t, 'vocab.loadFailed', '无法读取生词本。'));
+      setFailed(false);
+    } catch {
+      // A raw error message can be a technical string the learner cannot act
+      // on, so the curated copy carries both what happened and what to do.
+      setFailed(true);
+      setNote(`${label(t, 'vocab.loadFailed', '无法读取生词本。')} ${label(t, 'vocab.loadFailedHint', '请关闭面板后重新打开。')}`);
     } finally {
       setLoading(false);
     }
@@ -271,6 +263,28 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
     ? label(t, 'vocab.empty', '生词本还是空的。在阅读时点击任意单词即可收藏。')
     : label(t, 'vocab.emptyFiltered', '没有符合当前筛选的单词。');
 
+  // The placeholder for the list that is still being read. Its shape is the
+  // shape of the rows that will replace it.
+  const loadingState = h(
+    'div',
+    {
+      className: 'er-wordlist-loading',
+      role: 'status',
+      'aria-label': label(t, 'vocab.loading', '正在读取生词本…'),
+    },
+    h(
+      'div',
+      { className: 'er-state' },
+      h(
+        'div',
+        { className: 'er-skeleton' },
+        h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '84%' } }),
+        h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '58%' } }),
+        h('div', { className: 'er-skeleton-line', style: { '--er-skeleton-width': '72%' } }),
+      ),
+    ),
+  );
+
   return h(
     'div',
     {
@@ -401,9 +415,11 @@ export function WordList({ t, open, onClose, onOpenEntry, onReview, variant = 'd
         ),
         note ? h('div', { className: 'er-wordlist-note' }, note) : null,
         loading && entries.length === 0
-          ? h('div', { className: 'er-wordlist-empty' }, label(t, 'vocab.loading', '正在读取生词本…'))
+          ? loadingState
           : null,
-        !loading && visible.length === 0
+        // The empty state is only true when the list was read and held
+        // nothing; a list that could not be read says so in the note above.
+        !loading && !failed && visible.length === 0
           ? h('div', { className: 'er-wordlist-empty' }, emptyText)
           : null,
         visible.length > 0

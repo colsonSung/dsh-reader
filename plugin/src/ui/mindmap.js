@@ -14,6 +14,7 @@
  */
 import { createElement as h, useEffect, useMemo, useState } from 'react';
 import { Modal } from './library.js';
+import { TOKENS } from './tokens.js';
 
 /** The plugin id; the host removes the stylesheet together with the plugin. */
 const PLUGIN_ID = '@local/reader';
@@ -25,47 +26,68 @@ const PLUGIN_ID = '@local/reader';
  * to the other parts of the reader as well. The mind map therefore brings its
  * own rules, under its own prefix, so that nothing here can change the look
  * of the rest of the reader.
+ *
+ * The rules read the reader's own token block, which is installed with them:
+ * the module never has to hope that the panel above it defines the colours.
  */
 const STYLE = `
 .er-mm{display:flex;flex-direction:column;gap:10px;min-width:0}
 .er-mm-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.er-mm-scope{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.er-mm-scope{font-size:12px;color:var(--er-ink-3)}
 .er-mm-actions{margin-left:auto;display:flex;gap:8px}
-.er-mm-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;font-size:12px;color:var(--dsw-alias-label-secondary)}
-.er-mm-status.is-loading::before{content:'';width:11px;height:11px;flex:none;border-radius:50%;border:2px solid var(--er-line-strong);border-top-color:var(--er-accent);animation:er-mm-spin .9s linear infinite}
+.er-mm-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;font-size:12px;color:var(--er-ink-2)}
+/* The spinner is the accent: it is the one thing that moves while the map is
+   being made, so it carries the hue of the family and nothing else. */
+.er-mm-status.is-loading::before{content:'';width:11px;height:11px;flex:none;border-radius:var(--er-r-pill);border:2px solid var(--er-line-strong);border-top-color:var(--er-accent);animation:er-mm-spin .9s linear infinite}
 @keyframes er-mm-spin{to{transform:rotate(360deg)}}
-.er-mm-error{display:flex;flex-direction:column;gap:3px;padding:8px 11px;border-radius:var(--dsw-radius-sm);border:1px solid var(--dsw-alias-state-error-primary);color:var(--dsw-alias-state-error-primary);font-size:12px;line-height:1.5}
+/* A failure is a note, not an alarm: a soft fill, the ink of the family for
+   the words and the ordinary hairline for the edge. */
+.er-mm-error{display:flex;flex-direction:column;gap:3px;padding:8px 11px;border-radius:var(--er-r-card);border:1px solid var(--er-line);background:var(--er-err-soft);color:var(--er-err-ink);font-size:12px;line-height:1.5}
 .er-mm-error-title{font-weight:600}
-.er-mm-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:190px;padding:24px;text-align:center;color:var(--dsw-alias-label-tertiary)}
-.er-mm-empty-title{font-size:14px;color:var(--dsw-alias-label-secondary)}
+.er-mm-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:190px;padding:24px;text-align:center;color:var(--er-ink-3)}
+.er-mm-empty-title{font-size:14px;color:var(--er-ink-2)}
 .er-mm-empty-hint{font-size:12px;max-width:420px;line-height:1.7}
 .er-mm-canvas{display:block;width:100%;height:auto;max-height:62vh}
 .er-mm-link{fill:none;stroke:var(--er-line-strong);stroke-width:1.5;stroke-linecap:round}
-.er-mm-box{stroke-width:1}
+/* The corner of a box is the radius of the family, not a number of its own;
+   the drawing therefore has no magic radius in it. */
+.er-mm-box{stroke-width:1;rx:var(--er-r-card);ry:var(--er-r-card);transition:stroke var(--er-dur-hover) var(--er-ease)}
+/* Three levels, drawn with surface and ink and never with a new colour: the
+   topic is the accent, a branch is a card and a point is a slot in it. */
 .er-mm-node.is-root .er-mm-box{fill:var(--er-accent);stroke:none}
-.er-mm-node.is-branch .er-mm-box{fill:var(--er-surface-2);stroke:var(--er-line)}
-.er-mm-node.is-item .er-mm-box{fill:var(--er-surface-1);stroke:var(--er-line-strong)}
-.er-mm-label{fill:var(--dsw-alias-label-primary);font-family:var(--dsw-font,inherit);text-anchor:middle}
+.er-mm-node.is-branch .er-mm-box{fill:var(--er-surface-1);stroke:var(--er-line-strong)}
+.er-mm-node.is-item .er-mm-box{fill:var(--er-sunken);stroke:var(--er-line)}
+.er-mm-label{fill:var(--er-ink);font-family:var(--dsw-font,inherit);text-anchor:middle}
 .er-mm-node.is-root .er-mm-label{fill:var(--er-on-accent);font-size:14px;font-weight:600}
-.er-mm-node.is-branch .er-mm-label{font-size:13px}
-.er-mm-node.is-item .er-mm-label{fill:var(--dsw-alias-label-secondary);font-size:12px}
-/* The switch between the layouts; it sits in the head of the panel. */
-.er-mm-switch{display:inline-flex;gap:2px;padding:2px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-2)}
-.er-mm-switch-item{appearance:none;border:0;border-radius:var(--dsw-radius-xs);padding:5px 12px;background:transparent;color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer}
-.er-mm-switch-item:hover{background:var(--dsw-alias-interactive-bg-hover)}
-.er-mm-switch-item.is-active{background:var(--er-surface-1);color:var(--dsw-alias-label-primary);font-weight:500}
-.er-mm-switch-item:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--er-accent));outline-offset:1px}
+.er-mm-node.is-branch .er-mm-label{font-size:13px;font-weight:500}
+.er-mm-node.is-item .er-mm-label{fill:var(--er-ink-2);font-size:12px}
+/* The switch between the layouts; it sits in the head of the panel. The
+   track is a sunken slot and the picked layout is a card inside it. */
+.er-mm-switch{display:inline-flex;gap:2px;padding:2px;border-radius:var(--er-r-inp);background:var(--er-sunken)}
+.er-mm-switch-item{appearance:none;border:0;border-radius:var(--er-r-ctl);padding:5px 12px;background:transparent;color:var(--er-ink-2);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer;transition:background-color var(--er-dur-hover) var(--er-ease),color var(--er-dur-hover) var(--er-ease)}
+.er-mm-switch-item:hover{background:var(--er-hover-strong)}
+.er-mm-switch-item.is-active{background:var(--er-surface-1);color:var(--er-ink);font-weight:500}
+.er-mm-switch-item:focus-visible{outline:var(--er-focus);outline-offset:1px}
 /* A node can be picked, so it says so with the pointer and the keyboard. */
 .er-mm-node{cursor:pointer}
 .er-mm-node:focus{outline:none}
+/* The pointer says that a node can be picked; the topic carries the accent
+   already, so only the other two levels answer the pointer. */
+.er-mm-node.is-branch:hover .er-mm-box,.er-mm-node.is-item:hover .er-mm-box{stroke:var(--er-accent-line)}
+.er-mm-node:focus-visible{outline:var(--er-focus);outline-offset:2px}
 .er-mm-node:focus-visible .er-mm-box{stroke:var(--er-accent);stroke-width:2}
 .er-mm-node.is-selected .er-mm-box{stroke:var(--er-accent);stroke-width:2}
 /* The bar at the foot of the panel; it stays there while the map scrolls. */
 .er-mm-bar{position:sticky;bottom:0;z-index:2;display:flex;align-items:center;gap:10px;margin-top:4px;padding:10px 0 2px;background:var(--er-surface-1);border-top:1px solid var(--er-line)}
-.er-mm-bar-label{font-size:13px;font-weight:500;color:var(--dsw-alias-label-primary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42%}
-.er-mm-bar-quote{margin-left:2px;font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.er-mm-bar-hint{font-size:12px;color:var(--dsw-alias-label-tertiary)}
+.er-mm-bar-label{font-size:13px;font-weight:500;color:var(--er-ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42%}
+.er-mm-bar-quote{margin-left:2px;font-size:12px;color:var(--er-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.er-mm-bar-hint{font-size:12px;color:var(--er-ink-3)}
 .er-mm-bar .er-btn{margin-left:auto;flex:none}
+/* Nothing in the panel moves on its own when the learner asks for less
+   motion: the spinner stops and the states settle at once. */
+@media (prefers-reduced-motion:reduce){
+  .er-mm,.er-mm *{animation:none!important;transition:none!important}
+}
 `;
 
 /**
@@ -79,7 +101,7 @@ const STYLE = `
 function installStyles() {
   const style = document.createElement('style');
   style.setAttribute('data-plugin', PLUGIN_ID);
-  style.textContent = STYLE;
+  style.textContent = TOKENS + STYLE;
   document.head.appendChild(style);
   return () => { style.remove(); };
 }
@@ -1013,8 +1035,8 @@ export function MindMapView({ t, scope, data, loading, error, onClose, onRegener
               y: node.y,
               width: node.w,
               height: node.h,
-              rx: 10,
-              ry: 10,
+              // The corner radius comes from the family, not from a number
+              // of its own: the stylesheet sets it on the class.
             },
             node.note === '' ? null : h('title', {}, node.note),
           ),
