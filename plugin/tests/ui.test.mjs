@@ -103,6 +103,17 @@ async function switchToType(container) {
 }
 
 /**
+ * Switch the reader into a practice mode by its localized label.
+ * @param {Element} container - the rendered reader
+ * @param {string} label - the localized mode label ('reader.modeType', …)
+ */
+async function switchToMode(container, label) {
+  const modeButton = [...container.querySelectorAll('.er-mode')].find((button) => button.textContent === label)
+  assert.ok(modeButton, `the ${label} mode button must exist`)
+  await act(async () => { modeButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+}
+
+/**
  * Switch the reader into the typing mode with the whole paragraph as target.
  * @param {Element} container - the rendered reader
  */
@@ -192,8 +203,150 @@ test('the reader shows the sentence and scores the typed text', async () => {
     await typeWord(field, word)
   }
 
-  assert.match(container.querySelector('.er-type-bar').textContent, /100%/)
+  assert.match(container.querySelector('.er-type-bar-status').textContent, /100%/)
   assert.equal(container.querySelectorAll('.er-char.is-bad-char').length, 0)
+  await act(async () => { root.unmount() })
+})
+
+test('a missed word is missed, not wrong, in the passage', async () => {
+  const { alignSpokenWords } = await import('../src/ui/reader.js')
+  const practice = [
+    { text: 'The', displayIndex: 0 },
+    { text: 'quick', displayIndex: 1 },
+    { text: 'brown', displayIndex: 2 },
+    { text: 'fox.', displayIndex: 3 },
+  ]
+  const result = [
+    { word: 'The', status: 'ok' },
+    { word: 'quick', status: 'wrong', heard: 'quack' },
+    { word: 'brown', status: 'missing' },
+    { word: 'fox', status: 'ok' },
+  ]
+  const states = alignSpokenWords(result, practice)
+  // 'ok', 'bad', null (missed), 'ok' — the null is what paints the dotted mark.
+  assert.deepEqual(states, ['ok', 'bad', null, 'ok'])
+})
+
+test('the paper is a fixed frame and the text scrolls inside it', async () => {
+  const { ReaderView } = await import('../src/ui/reader.js')
+  const container = dom.window.document.createElement('div')
+  dom.window.document.body.appendChild(container)
+  const root = ReactDOM.createRoot(container)
+  await act(async () => {
+    root.render(React.createElement(ReaderView, {
+      t,
+      book: { title: 'Test Book' },
+      units: paragraphUnits(),
+      index: 0,
+      onIndexChange: () => {},
+    }))
+  })
+
+  // The sheet is the frame; the window inside it is what scrolls. The
+  // paragraphs must live in the window, never as siblings of it.
+  const page = container.querySelector('.er-reading-page')
+  assert.ok(page, 'the paper must exist')
+  const window_ = page.querySelector(':scope > .er-reading-scroll')
+  assert.ok(window_, 'the text window must sit inside the paper')
+  assert.ok(window_.querySelector('.er-page-paragraph'), 'the paragraphs live in the text window')
+  assert.equal(page.querySelector(':scope > .er-page-paragraph'), null, 'no paragraph may sit outside the window')
+
+  await act(async () => { root.unmount() })
+})
+
+test('the practice panel is three zones with one selected style', async () => {
+  const { ReaderView } = await import('../src/ui/reader.js')
+  const units = paragraphUnits()
+  const container = dom.window.document.createElement('div')
+  dom.window.document.body.appendChild(container)
+  const root = ReactDOM.createRoot(container)
+  await act(async () => {
+    root.render(React.createElement(ReaderView, {
+      t,
+      book: { title: 'Test Book' },
+      units,
+      index: 0,
+      onIndexChange: () => {},
+    }))
+  })
+
+  const panel = container.querySelector('.er-modes')
+  assert.ok(panel, 'the practice panel must exist')
+  const modes = panel.querySelector('.er-mode-chips')
+  const scope = panel.querySelector('.er-scope')
+  const aids = panel.querySelector('.er-modes-aids')
+  assert.ok(modes && scope && aids, 'the panel has three zones: mode, unit, aids')
+  assert.equal(modes.querySelectorAll('.er-mode').length, 3)
+  assert.equal(scope.querySelectorAll('.er-scope-item').length, 3)
+
+  // The translation toggle is a reading aid, not a fourth practice unit: it
+  // sits in its own zone so the two decisions never blur together.
+  const translate = aids.querySelector('.er-translate-toggle')
+  assert.ok(translate, 'the translation toggle lives in the aids zone')
+  assert.equal(scope.contains(translate), false)
+
+  // Exactly one mode and one unit are selected; a toggle is neither.
+  assert.equal(panel.querySelectorAll('[aria-pressed="true"]').length, 2)
+
+  // Each zone carries its own accessible name, and the aid zone does not reuse
+  // the mode zone's name: a screen reader would hear two "learning modes".
+  assert.equal(modes.getAttribute('role'), 'group')
+  assert.equal(scope.getAttribute('role'), 'group')
+  assert.equal(aids.getAttribute('role'), 'group')
+  assert.notEqual(aids.getAttribute('aria-label'), modes.getAttribute('aria-label'))
+
+  // Choosing closes the panel and hands focus back to its toggle, so the row
+  // does not linger behind :focus-within.
+  const toggle = container.querySelector('.er-modes-toggle')
+  await act(async () => { toggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  assert.match(container.querySelector('.er-reader').className, /is-modes-open/)
+  const paragraphChip = [...container.querySelectorAll('.er-scope-item')]
+    .find((chip) => chip.textContent === 'reader.scopeParagraph')
+  await act(async () => { paragraphChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  assert.doesNotMatch(container.querySelector('.er-reader').className, /is-modes-open/)
+
+  await act(async () => { root.unmount() })
+})
+
+test('the bottom bar switches with the mode instead of stacking', async () => {
+  const { ReaderView } = await import('../src/ui/reader.js')
+  const container = dom.window.document.createElement('div')
+  dom.window.document.body.appendChild(container)
+  const root = ReactDOM.createRoot(container)
+  await act(async () => {
+    root.render(React.createElement(ReaderView, {
+      t,
+      book: { title: 'Test Book' },
+      units: paragraphUnits(),
+      index: 0,
+      onIndexChange: () => {},
+    }))
+  })
+
+  // Reading mode: the player is the only bottom bar, no practice panel.
+  assert.ok(container.querySelector('.er-read-foot'), 'the player belongs to the reading mode')
+  assert.equal(container.querySelector('.er-type-panel'), null)
+  assert.equal(container.querySelector('.er-speak-panel'), null)
+
+  // Typing mode: the typing bar takes the bottom and the player leaves, so
+  // the learner never reads two bars that fight for the same edge.
+  await switchToMode(container, 'reader.modeType')
+  assert.equal(container.querySelector('.er-read-foot'), null, 'the player must not stay under the typing bar')
+  assert.ok(container.querySelector('.er-mode-dock.is-typing .er-type-panel'), 'the typing bar is docked')
+  assert.match(container.querySelector('.er-reader').className, /is-mode-type/)
+
+  // Read-aloud mode: same rule, the read-aloud bar is the only one.
+  await switchToMode(container, 'reader.modeSpeak')
+  assert.equal(container.querySelector('.er-read-foot'), null)
+  assert.ok(container.querySelector('.er-mode-dock.is-read-aloud .er-speak-panel'), 'the read-aloud bar is docked')
+  assert.equal(container.querySelector('.er-type-panel'), null)
+
+  // Back to reading: the player returns and the practice bars leave.
+  await switchToMode(container, 'reader.modeListen')
+  assert.ok(container.querySelector('.er-read-foot'))
+  assert.equal(container.querySelector('.er-type-panel'), null)
+  assert.equal(container.querySelector('.er-speak-panel'), null)
+
   await act(async () => { root.unmount() })
 })
 
@@ -332,7 +485,7 @@ test('typing the active sentence scores only that sentence', async () => {
     await typeWord(field, word)
   }
 
-  assert.match(container.querySelector('.er-type-bar').textContent, /100%/)
+  assert.match(container.querySelector('.er-type-bar-status').textContent, /100%/)
   assert.equal(container.querySelectorAll('.er-char.is-bad-char').length, 0)
   // The sentences outside the practice unit stay untouched context.
   assert.equal(container.querySelectorAll('.er-word.is-muted').length, 10)
@@ -364,7 +517,7 @@ test('a mistyped word stays in place and is marked red', async () => {
 
   assert.ok(container.querySelectorAll('.er-char.is-bad-char').length > 0, 'the wrong characters must be marked')
   assert.equal(container.querySelectorAll('.er-word.is-current').length, 1, 'the word stays the current one')
-  assert.ok(!/100%/.test(container.querySelector('.er-type-bar').textContent), 'the accuracy must drop')
+  assert.ok(!/100%/.test(container.querySelector('.er-type-bar-status').textContent), 'the accuracy must drop')
 
   await act(async () => { root.unmount() })
 })
@@ -394,7 +547,7 @@ test('typing the whole paragraph scores every word of it', async () => {
     await typeWord(field, word)
   }
 
-  assert.match(container.querySelector('.er-type-bar').textContent, /100%/)
+  assert.match(container.querySelector('.er-type-bar-status').textContent, /100%/)
   assert.equal(container.querySelectorAll('.er-char.is-bad-char').length, 0)
   assert.equal(container.querySelectorAll('.er-word.is-muted').length, 0)
 

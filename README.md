@@ -39,7 +39,9 @@ for a tapped word, and the vocabulary list.
 | **Per book** | listen straight from the cover — the play button sits on the artwork and is always there, no hovering — plus word frequency, book details, rename, delete, and an AI-drawn cover when the book has none |
 | **Listen** | read the current practice unit aloud with word-level highlighting; adjustable speed (0.5x–2x) and voice. The voice list follows the book's language: an English book gets English voices, a Chinese book gets Chinese ones. The playback range is yours to pick — **paragraph, chapter or the whole book** — with **repeats** (2 / 3 / 5 / 10 / until stopped), a **time limit** (10 / 30 / 60 / 120 minutes) and **auto-play**, which reads whatever you turn to |
 | **Type** | type **in place**, in the paragraph itself — the current word is highlighted, mistakes are marked red, accuracy and speed sit above, and the speech follows what you type, **one word at a time** |
-| **Read aloud** | speech recognition is transcribed and aligned word by word with the original, marking what you skipped, misread or added; falls back to a recording you grade yourself |
+| **Read aloud** | speech recognition is transcribed and aligned word by word with the original; the verdict is painted **on the passage itself** — a word read right keeps a thin green rule, a misread word gets a red wave (hover it to see what you actually said), a skipped word gets an amber dotted rule. A **pronunciation analysis** panel opens from the paragraph's right gutter: voice, intonation and word match, the suggestions, the word-by-word verdict, the transcript and your own recording. Falls back to a recording you grade yourself |
+| **One bar per mode** | the foot of the page holds exactly one control bar, and it follows the mode: the player in listen, the dictation in type, the recorder in read aloud. Each is **a single row** (51–61 px), no stacked panels; what does not fit there lives in the panel behind the paragraph's gutter button |
+| **The practice panel** | the mode strip is three zones separated by hairlines — **mode**, **practice unit** and **reading aid** (full-text translation) — with one selected style, 30 px chips and one keyboard tab stop per chip. It covers nothing: it floats under the top bar, opens on hover or from the top bar's button, and closes as soon as you pick something |
 | **Chinese books** | they read. Chinese sentences end at `。！？`, every character is a word, the punctuation stays on the page instead of vanishing, and the voices and the recogniser follow the language of the book |
 | **Tap a word** | a word card with phonetics, part of speech, definition, examples — and how the word reads in *this* sentence, generated live |
 | **Vocabulary** | star a word to keep it: a drawer with a progress ring (known / learning / to learn), today's additions, search and filters |
@@ -139,7 +141,7 @@ the rest of the application uses:
 | --- | --- |
 | `word` / `translate` / `breakdown` | the AI assist answers, with the Harness model as the fallback |
 | `tts` | the reading voice, synthesised by the provider |
-| `asr` | the transcription of your own reading |
+| `asr` | the transcription of your own reading; the recording is converted to 16 kHz mono WAV on the Host before it is sent |
 | `cover` | a generated book cover |
 | `voices` | the available voices |
 | `status` | which channels are available |
@@ -204,7 +206,7 @@ over http.
 cd plugin
 pnpm install
 node build.mjs                 # → client.js and client.pdf.js
-node --test tests/*.test.mjs    # 310 passing
+node --test tests/*.test.mjs    # 429 passing
 ```
 
 `client.js` and `client.pdf.js` are the shipped browser bundles and are
@@ -224,7 +226,8 @@ plugin/              the DeepSeek Harness bundle
   src/host/          the Host services: the shelf on disk, AI, MiniMax, Gutenberg
   src/lib/           parsers, the reading engine, the shelf client and its fallback
   src/ui/            the shelf, the reader, the word card, the vocabulary
-  tests/             310 tests over the parsers, the engine, the shelf and the UI
+  tests/             429 tests over the parsers, the engine, the shelf and the UI
+  tests/stage/       a headless-Chrome stage that renders the reader and reads the layout back as JSON
   tools/preview/     a standalone harness that renders the reader
 docs/                the screenshots and the demo recording
 install.sh           installs the bundle into a profile

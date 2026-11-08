@@ -632,7 +632,7 @@ export function SourcePreview({ t, book, onClose, onDownload }) {
 
   return h(
     Modal,
-    { title: t('source.previewTitle'), onClose: close, size: 'wide' },
+    { title: t('source.previewTitle'), closeLabel: t('source.close'), onClose: close, size: 'wide' },
     h(
       'div',
       { className: 'er-source' },

@@ -258,6 +258,39 @@ export function PencilIcon(props) {
   });
 }
 
+/** A graduation cap: learning and study modes. */
+/** A speaker that has been switched off: the dictation voice is muted. */
+export function MutedIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('path', { key: 'a', d: 'M3.2 6.4h1.9L8 4.1v7.8l-2.9-2.3H3.2z' }),
+      h('path', { key: 'b', d: 'M10.6 6.2l3.2 3.6M13.8 6.2l-3.2 3.6' }),
+    ],
+  });
+}
+
+/** A waveform: the voice review of the read-aloud. */
+export function WaveIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('path', { key: 'a', d: 'M3 8h.8M6 5.6v4.8M9 3.4v9.2M12 6.2v3.6M15 7.2v1.6' }),
+    ],
+  });
+}
+
+export function LearningIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('path', { key: 'a', d: 'm1.5 6 6.5-3.2L14.5 6 8 9.2z' }),
+      h('path', { key: 'b', d: 'M4 7.6v3.1c2.4 1.9 5.6 1.9 8 0V7.6' }),
+      h('path', { key: 'c', d: 'M13 6.6v4.1' }),
+    ],
+  });
+}
+
 /** A mind map: one centre with branches reaching out of it. */
 export function MindMapIcon(props) {
   return glyph({

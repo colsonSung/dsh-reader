@@ -161,7 +161,7 @@ function CoverPicture({ src, title }) {
  * @param {'default'|'wide'} [props.size] - the width of the modal.
  * @returns {any} the element tree
  */
-export function Modal({ title, onClose, children, size = 'default' }) {
+export function Modal({ title, onClose, children, size = 'default', closeLabel = 'Close' }) {
   useEffect(() => {
     const onKeyDown = (event) => { if (event.key === 'Escape') onClose(); };
     document.addEventListener('keydown', onKeyDown);
@@ -186,7 +186,17 @@ export function Modal({ title, onClose, children, size = 'default' }) {
         'div',
         { className: 'er-modal-head' },
         h('div', { className: 'er-modal-title' }, title),
-        h('button', { type: 'button', className: 'er-round-button', onClick: onClose }, h(CloseIcon, { size: 16 })),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'er-round-button er-modal-close',
+            title: closeLabel,
+            'aria-label': closeLabel,
+            onClick: onClose,
+          },
+          h(CloseIcon, { size: 16 }),
+        ),
       ),
     ),
   );
@@ -524,7 +534,13 @@ export function LibraryView({
         { className: 'er-book-actions' },
         h('button', { type: 'button', className: 'er-btn', onClick: () => { onListen?.(book.id); } }, t('library.listen')),
         h('button', { type: 'button', className: 'er-btn er-btn-primary', onClick: () => { onOpen(book.id); } }, percent > 0 ? t('library.continue') : t('library.open')),
-        h('button', { type: 'button', className: 'er-btn er-btn-danger er-btn-icon', title: t('library.delete'), onClick: () => { onDelete(book.id); } }, h(TrashIcon, { size: 14 })),
+        h('button', {
+          type: 'button',
+          className: 'er-btn er-btn-danger er-btn-icon',
+          title: t('library.delete'),
+          'aria-label': t('library.delete'),
+          onClick: () => { onDelete(book.id); },
+        }, h(TrashIcon, { size: 14 })),
       ),
     );
   };
@@ -537,7 +553,7 @@ export function LibraryView({
       const max = words[0]?.count ?? 1;
       return h(
         Modal,
-        { title: `${t('library.frequencyTitle')} · ${book.title}`, onClose: () => { setModal(null); } },
+        { title: `${t('library.frequencyTitle')} · ${book.title}`, closeLabel: t('library.close'), onClose: () => { setModal(null); } },
         h(
           'div',
           { className: 'er-frequency' },
@@ -586,7 +602,7 @@ export function LibraryView({
       }
       return h(
         Modal,
-        { title: book.title, onClose: () => { setModal(null); } },
+        { title: book.title, closeLabel: t('library.close'), onClose: () => { setModal(null); } },
         h(
           'div',
           { className: 'er-details' },
@@ -601,7 +617,7 @@ export function LibraryView({
     }
     return h(
       Modal,
-      { title: t('library.menuRename'), onClose: () => { setModal(null); } },
+      { title: t('library.menuRename'), closeLabel: t('library.close'), onClose: () => { setModal(null); } },
       h('input', {
         className: 'er-rename-input',
         value: renameValue,
@@ -655,6 +671,7 @@ export function LibraryView({
           type: 'button',
           className: 'er-view-switch-item',
           title: view === 'grid' ? t('library.viewList') : t('library.viewGrid'),
+          'aria-label': view === 'grid' ? t('library.viewList') : t('library.viewGrid'),
           onClick: () => { onViewChange?.(view === 'grid' ? 'list' : 'grid'); },
         },
         view === 'grid' ? h(GridIcon, { size: 16 }) : h(ListIcon, { size: 16 }),

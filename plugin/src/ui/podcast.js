@@ -466,7 +466,7 @@ export function PodcastView({
 
   return h(
     Modal,
-    { title: t('podcast.title'), onClose, size: 'wide' },
+    { title: t('podcast.title'), closeLabel: t('reader.close'), onClose, size: 'wide' },
     h(
       'div',
       { className: 'er-pod' },

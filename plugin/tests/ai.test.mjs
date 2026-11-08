@@ -121,7 +121,7 @@ test('word 方法返回契约写死的字段', async () => {
   });
 });
 
-test('请求带上了默认模型、温度与 token 上限，消息是 content block 形状', async () => {
+test('请求带上了默认模型与 token 上限，消息是 content block 形状', async () => {
   const llm = createFakeLlm('{"word":"x"}');
   await runAiMethod('word', { word: 'x' }, { llm, agentDefaultModel: createFakeSelection() });
 
@@ -129,20 +129,36 @@ test('请求带上了默认模型、温度与 token 上限，消息是 content b
   assert.deepEqual(llm.calls[0].config, {
     provider: 'onerway',
     model: 'MiniMax-M3.1-Flash',
-    temperature: 0.2,
     maxTokens: 800,
   });
 
   const options = llm.streams[0];
   assert.equal(options.provider, 'onerway');
   assert.equal(options.model, 'MiniMax-M3.1-Flash');
-  assert.equal(options.temperature, 0.2);
+  // Sampling is the route's decision: a reasoning route may reject any
+  // temperature but its own, so the plugin does not force one.
+  assert.equal(options.temperature, undefined);
   assert.equal(options.maxTokens, 800);
   assert.equal(options.messages.length, 1);
   assert.equal(options.messages[0].role, 'user');
   assert.equal(options.messages[0].content[0].type, 'text');
   assert.match(options.messages[0].content[0].text, /middle|x/);
   assert.match(options.system, /JSON/);
+});
+
+test('请求带上进程内稳定的 sessionId（opencode-go 之类按 session 路由的 provider 必需）', async () => {
+  const first = createFakeLlm('{"word":"x"}');
+  await runAiMethod('word', { word: 'x' }, { llm: first, agentDefaultModel: createFakeSelection() });
+  const second = createFakeLlm('{"word":"y"}');
+  await runAiMethod('word', { word: 'y' }, { llm: second, agentDefaultModel: createFakeSelection() });
+
+  const firstId = first.streams[0].sessionId;
+  const secondId = second.streams[0].sessionId;
+  assert.equal(typeof firstId, 'string');
+  assert.match(firstId, /^reader-assist-/);
+  // One stable id per process: a new id per request would spread the assists
+  // over a new provider routing bucket every time.
+  assert.equal(firstId, secondId);
 });
 
 test('translate 按指定的目标语言作答', async () => {
@@ -584,4 +600,280 @@ test('宿主路由在失败时返回 { ok: false, error } 信封', async () => {
   const body = await response.json();
   assert.equal(body.ok, false);
   assert.equal(body.error.message, '宿主未配置可用模型，AI 释义不可用');
+});
+
+/**
+ * 记录调用的假 MiniMax 通道。
+ * @param {object} options - 行为开关。
+ * @param {boolean} [options.available] - isAvailable 的返回值。
+ * @param {string|Error} [options.answer] - 回答文本或要抛出的错误。
+ * @param {object} [options.channelState] - channelState 的返回值。
+ * @returns {object} 假通道。
+ */
+function createFakeMinimax(options = {}) {
+  const calls = [];
+  return {
+    calls,
+    async isAvailable() {
+      return options.available ?? true;
+    },
+    async chat(request) {
+      calls.push(request);
+      if (options.answer instanceof Error) throw options.answer;
+      if (Array.isArray(options.answer)) return options.answer.length > 1 ? options.answer.shift() : options.answer[0];
+      return options.answer ?? '{"text":"来自 MiniMax"}';
+    },
+    channelState() {
+      return options.channelState ?? { coolingDown: false, lastFailure: null, source: 'env', configured: true };
+    },
+  };
+}
+
+/**
+ * 造一个带 code 的 MiniMax 失败。
+ * @param {string} code - 错误码。
+ * @param {string} message - 中文文案。
+ * @param {object} [extra] - 额外字段。
+ * @returns {Error} 失败。
+ */
+function minimaxFailure(code, message, extra = {}) {
+  const error = new Error(message);
+  error.code = code;
+  Object.assign(error, extra);
+  return error;
+}
+
+test('MiniMax 健康时优先走 MiniMax，宿主模型不被调用', async () => {
+  const minimax = createFakeMinimax({ answer: '{"text":"你好，世界"}' });
+  const llm = createFakeLlm('{"text":"宿主回答"}');
+  const result = await runAiMethod('translate', { text: 'Hello, world' }, {
+    llm,
+    agentDefaultModel: createFakeSelection(),
+    minimax,
+  });
+  assert.deepEqual(result, { text: '你好，世界' });
+  assert.equal(minimax.calls.length, 1);
+  assert.equal(llm.calls.length, 0);
+  // The Host credential store travels with the call, so a rotated key is used.
+  assert.equal(minimax.calls[0].maxTokens, 1200);
+});
+
+test('运行期 401：同一请求立即改用宿主 llm，结果成功', async () => {
+  const minimax = createFakeMinimax({
+    answer: minimaxFailure('MINIMAX_INVALID_KEY', 'MiniMax API Key 无效或已失效，请更新 MINIMAX_API_KEY', { status: 401, providerCode: 2049 }),
+  });
+  const llm = createFakeLlm(JSON.stringify({ word: 'middle', definition: '中间的' }));
+  const result = await runAiMethod('word', { word: 'middle' }, {
+    llm,
+    agentDefaultModel: createFakeSelection(),
+    minimax,
+  });
+  assert.equal(result.definition, '中间的');
+  assert.equal(minimax.calls.length, 1);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('运行期 404 模型下线：同一请求直接回退宿主 llm', async () => {
+  const minimax = createFakeMinimax({
+    answer: minimaxFailure('MINIMAX_MODEL_UNAVAILABLE', 'MiniMax 模型不可用（模型名可能已下线）：no longer available', { status: 404, providerCode: 2069 }),
+  });
+  const llm = createFakeLlm(JSON.stringify({ text: '你好' }));
+  const result = await runAiMethod('translate', { text: 'Hello' }, {
+    llm,
+    agentDefaultModel: createFakeSelection(),
+    minimax,
+  });
+  assert.deepEqual(result, { text: '你好' });
+  assert.equal(llm.calls.length, 1);
+});
+
+test('MiniMax 通道冷却时直接跳过，不再发 MiniMax 请求', async () => {
+  const minimax = createFakeMinimax({
+    available: false,
+    channelState: {
+      coolingDown: true,
+      lastFailure: {
+        code: 'MINIMAX_QUOTA',
+        status: 402,
+        providerCode: 2067,
+        message: 'MiniMax 账户额度已用尽（Token Plan 用量上限或余额不足），请充值或更换 API Key',
+        at: Date.now(),
+      },
+    },
+  });
+  const llm = createFakeLlm(JSON.stringify({ word: 'middle', definition: '中间的' }));
+  const result = await runAiMethod('word', { word: 'middle' }, {
+    llm,
+    agentDefaultModel: createFakeSelection(),
+    minimax,
+  });
+  assert.equal(result.definition, '中间的');
+  assert.equal(minimax.calls.length, 0);
+  assert.equal(llm.calls.length, 1);
+});
+
+test('MiniMax 与宿主 llm 都失败：给出可执行中文错误，并带两边的 details code（Key 失效）', async () => {
+  const minimax = createFakeMinimax({
+    answer: minimaxFailure('MINIMAX_INVALID_KEY', 'MiniMax API Key 无效或已失效，请更新 MINIMAX_API_KEY', { status: 401, providerCode: 2049 }),
+  });
+  const llm = {
+    async prepareCall() {
+      const error = new Error('no adapter registered for provider "onerway"');
+      error.code = 'NO_ADAPTER';
+      throw error;
+    },
+  };
+  await assert.rejects(
+    () => runAiMethod('word', { word: 'middle' }, {
+      llm,
+      agentDefaultModel: createFakeSelection(),
+      minimax,
+    }),
+    (error) => {
+      assert.equal(error.code, 'AI_MINIMAX_KEY_INVALID');
+      assert.match(error.message, /MiniMax Key 失效/);
+      assert.match(error.message, /宿主模型不可用/);
+      assert.equal(error.details.minimax.code, 'MINIMAX_INVALID_KEY');
+      assert.equal(error.details.minimax.status, 401);
+      assert.equal(error.details.minimax.providerCode, 2049);
+      assert.equal(error.details.llm.code, 'NO_ADAPTER');
+      return true;
+    },
+  );
+});
+
+test('MiniMax 冷却 + 宿主 llm 也失败：错误里点名两个通道并带 details', async () => {
+  const minimax = createFakeMinimax({
+    available: false,
+    channelState: {
+      coolingDown: true,
+      lastFailure: { code: 'MINIMAX_QUOTA', status: 402, providerCode: 2067, message: 'MiniMax 账户额度已用尽', at: Date.now() },
+    },
+  });
+  const llm = {
+    async prepareCall() {
+      const error = new Error('the model adapter is missing');
+      error.code = 'NO_MODEL';
+      throw error;
+    },
+  };
+  await assert.rejects(
+    () => runAiMethod('word', { word: 'middle' }, {
+      llm,
+      agentDefaultModel: createFakeSelection(),
+      minimax,
+    }),
+    (error) => {
+      assert.equal(error.code, 'AI_MINIMAX_UNAVAILABLE');
+      assert.match(error.message, /MiniMax 通道不可用/);
+      assert.match(error.message, /宿主模型不可用/);
+      assert.equal(error.details.minimax.providerCode, 2067);
+      assert.equal(error.details.llm.code, 'NO_MODEL');
+      return true;
+    },
+  );
+});
+
+test('MiniMax 回答不是 JSON 时在同一条通道上重试一次', async () => {
+  const minimax = createFakeMinimax({ answer: ['不是 JSON', '{"text":"重试后成功"}'] });
+  const llm = createFakeLlm('{"text":"宿主回答"}');
+  const result = await runAiMethod('translate', { text: 'Hello' }, {
+    llm,
+    agentDefaultModel: createFakeSelection(),
+    minimax,
+  });
+  assert.deepEqual(result, { text: '重试后成功' });
+  assert.equal(minimax.calls.length, 2);
+  assert.equal(llm.calls.length, 0);
+});
+
+test('status 路由返回真实的通道健康态（无 Key 时为 none）', async () => {
+  let route;
+  const ctx = {
+    services: {
+      credentials: { async resolve() { return undefined; } },
+      llm: undefined,
+      agentDefaultModel: createFakeSelection(),
+    },
+    get(name) {
+      return this.services[name];
+    },
+    inject(names, callback) {
+      callback({
+        effect(fn) {
+          return fn();
+        },
+        connection: {
+          fetch: {
+            register(definition) {
+              route = definition;
+              return () => {};
+            },
+          },
+        },
+      });
+    },
+  };
+  apply(ctx);
+
+  const request = new Request('http://127.0.0.1/api/reader', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method: 'status', payload: {} }),
+  });
+  const response = await route.fetch(request);
+  const body = await response.json();
+  assert.equal(body.ok, true);
+  assert.equal(body.result.minimax, false);
+  assert.equal(body.result.source, 'none');
+  assert.equal(body.result.chatModel, 'MiniMax-M3.1-Flash');
+  assert.equal(body.result.ttsModel, 'speech-02-hd');
+  assert.match(body.result.reason, /未配置/);
+});
+
+test('路由失败时的 details 带上底层 code', async () => {
+  let route;
+  const ctx = {
+    services: {
+      credentials: { async resolve() { return undefined; } },
+      llm: {
+        async prepareCall() {
+          const error = new Error('no adapter registered');
+          error.code = 'NO_ADAPTER';
+          throw error;
+        },
+      },
+      agentDefaultModel: createFakeSelection(),
+    },
+    get(name) {
+      return this.services[name];
+    },
+    inject(names, callback) {
+      callback({
+        effect(fn) {
+          return fn();
+        },
+        connection: {
+          fetch: {
+            register(definition) {
+              route = definition;
+              return () => {};
+            },
+          },
+        },
+      });
+    },
+  };
+  apply(ctx);
+
+  const request = new Request('http://127.0.0.1/api/reader', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ method: 'word', payload: { word: 'middle' } }),
+  });
+  const response = await route.fetch(request);
+  const body = await response.json();
+  assert.equal(body.ok, false);
+  assert.equal(body.error.message, '宿主未配置可用模型，AI 释义不可用');
+  assert.equal(body.error.details.code, 'NO_ADAPTER');
 });

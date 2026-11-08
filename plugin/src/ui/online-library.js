@@ -58,7 +58,7 @@ export function OnlineLibrary({ t, onClose, onImported }) {
 
   return h(
     Modal,
-    { title: t('source.title'), onClose },
+    { title: t('source.title'), closeLabel: t('source.close'), onClose },
     h(
       'div',
       { className: 'er-source' },

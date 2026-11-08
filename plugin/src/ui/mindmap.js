@@ -1088,7 +1088,7 @@ export function MindMapView({ t, scope, data, loading, error, onClose, onRegener
 
   return h(
     Modal,
-    { title: t('mindmap.title'), onClose, size: 'wide' },
+    { title: t('mindmap.title'), closeLabel: t('reader.close'), onClose, size: 'wide' },
     h('div', { className: 'er-mm' }, head, failure, status, drawing, bar),
   );
 }

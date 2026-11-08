@@ -13,10 +13,23 @@
  * model: `llm`, `agentDefaultModel` and `timeoutMs`.
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { translationLanguageName } from '../lib/languages.js';
 
 /** The methods the client half may ask for. */
 export const AI_METHODS = Object.freeze(['word', 'translate', 'breakdown', 'mindmap', 'podcast', 'podcastReply']);
+
+/**
+ * The session id this channel reports to a provider that routes by session.
+ *
+ * The route is reached from a browser fetch, not from an Agent turn, so no
+ * session id is attached to the call. Some providers — opencode-go is one —
+ * refuse a request that carries none (`MissingSessionID`) even when the API
+ * key is valid. One stable id per process keeps those requests in one routing
+ * bucket instead of minting a new bucket on every word card.
+ */
+const ASSIST_SESSION_ID = `reader-assist-${randomUUID()}`;
 
 /** Wall-clock budget for one request, covering the JSON retry as well. */
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -29,9 +42,6 @@ const DEFAULT_TIMEOUT_MS = 30000;
  * outline is built on.
  */
 const MAX_SOURCE_CHARS = 12000;
-
-/** Sampling temperature: the answer is a fact sheet, not prose. */
-const TEMPERATURE = 0.2;
 
 /** Raised when the Host has no model to answer with. */
 const NO_MODEL_MESSAGE = '宿主未配置可用模型，AI 释义不可用';
@@ -197,6 +207,7 @@ export function parseModelJson(raw) {
 const SPECS = {
   word: {
     maxTokens: 800,
+    timeoutMs: 60000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{word: string, sentence: string}} the checked input.
@@ -237,6 +248,7 @@ const SPECS = {
   },
   translate: {
     maxTokens: 1200,
+    timeoutMs: 90000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{text: string, target: string}} the checked input.
@@ -278,6 +290,7 @@ const SPECS = {
   },
   breakdown: {
     maxTokens: 1200,
+    timeoutMs: 90000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{sentence: string}} the checked input.
@@ -311,6 +324,7 @@ const SPECS = {
   },
   mindmap: {
     maxTokens: 3000,
+    timeoutMs: 90000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{title: string, chapterTitle: string, text: string}} the checked input.
@@ -359,6 +373,7 @@ const SPECS = {
   },
   podcast: {
     maxTokens: 4000,
+    timeoutMs: 180000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{title: string, chapterTitle: string, scope: string, text: string}} the checked input.
@@ -411,6 +426,7 @@ const SPECS = {
   },
   podcastReply: {
     maxTokens: 2000,
+    timeoutMs: 120000,
     /**
      * @param {any} payload - the client payload.
      * @returns {{title: string, chapterTitle: string, text: string, said: string}} the checked input.
@@ -499,14 +515,28 @@ export function serviceOf(ctx, name) {
  * generation to one dispatch: `stream` refuses options whose provider, model,
  * reasoning effort, temperature or token cap differ from the prepared config.
  * The stream options are therefore built from `prepared.config`.
+ *
+ * The sampling temperature is deliberately left to the route's own default:
+ * some reasoning routes reject any value other than theirs (the model k3, for
+ * example, answers a non-1 temperature with HTTP 400), and the JSON contract is
+ * enforced by the prompt and the one strict retry instead of by sampling.
  * @param {object} options - the call parameters.
  * @returns {Promise<string>} the model's answer.
  */
-async function complete({ llm, provider, model, system, user, maxTokens, signal }) {
-  const prepared = await llm.prepareCall({ provider, model, temperature: TEMPERATURE, maxTokens }, signal);
-  const config = prepared?.config ?? { provider, model, temperature: TEMPERATURE, maxTokens };
+async function complete({ llm, provider, model, reasoningEffort, system, user, maxTokens, signal }) {
+  // A reasoning model is bound to its reasoning effort: the prepared call and
+  // the dispatched stream must name the same one, so the selection's effort is
+  // carried through instead of being dropped on the floor.
+  const prepareConfig = { provider, model, maxTokens };
+  if (typeof reasoningEffort === 'string' && reasoningEffort !== '') prepareConfig.reasoningEffort = reasoningEffort;
+  const prepared = await llm.prepareCall(prepareConfig, signal);
+  const config = prepared?.config ?? prepareConfig;
   const request = {
     ...config,
+    // A provider that routes by session (opencode-go) rejects the call
+    // without one; the config comparison ignores this field, so it may ride
+    // on the prepared request.
+    sessionId: ASSIST_SESSION_ID,
     messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
     system,
     signal,
@@ -530,57 +560,223 @@ async function complete({ llm, provider, model, system, user, maxTokens, signal 
   if (failure !== undefined) {
     const error = new Error(modelErrorMessage(failure.failure));
     error.code = typeof failure.failure?.code === 'string' ? failure.failure.code : '';
+    // The provider's own words, for the failure details: the learner reads the
+    // Chinese sentence above, a developer needs to know what the route said.
+    if (typeof failure.failure?.message === 'string' && failure.failure.message !== '') {
+      error.providerMessage = failure.failure.message.slice(0, 300);
+    }
     throw error;
   }
   return answer;
 }
 
+/** How much of the whole request budget the MiniMax channel may take. */
+const MINIMAX_BUDGET_MS = 20000;
+
+/** Provider codes that mean "the MiniMax key itself is the problem". */
+const KEY_FAILURE_CODES = new Set(['MINIMAX_INVALID_KEY', 'MINIMAX_AUTH', 'NO_KEY']);
+
 /**
- * Whether the MiniMax channel can answer right now.
+ * The services the MiniMax channel needs from the Host.
+ *
+ * The credential store is read per request: the Host may mount or replace it,
+ * and a rotated key must reach the next operation.
+ *
+ * @param {object} deps - the injected dependencies.
+ * @returns {object} the channel dependencies.
+ */
+function minimaxDeps(deps) {
+  const channel = {};
+  if (deps.credentials !== undefined) channel.credentials = deps.credentials;
+  if (deps.minimaxState !== undefined) channel.state = deps.minimaxState;
+  if (deps.minimaxFetch !== undefined) channel.fetch = deps.minimaxFetch;
+  if (typeof deps.now === 'function') channel.now = deps.now;
+  if (Number.isFinite(deps.minimaxTimeoutMs) && deps.minimaxTimeoutMs > 0) channel.timeoutMs = deps.minimaxTimeoutMs;
+  return channel;
+}
+
+/**
+ * The public view of the MiniMax channel, if the caller injected one.
+ * @param {any} minimax - the MiniMax channel.
+ * @param {object} channelDeps - its dependencies.
+ * @returns {object|null} the state view, never the key.
+ */
+function channelSnapshot(minimax, channelDeps) {
+  if (minimax === undefined || minimax === null || typeof minimax.channelState !== 'function') return null;
+  try {
+    return minimax.channelState(channelDeps) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether the MiniMax channel can answer right now. A channel that is cooling
+ * down is skipped entirely: the Host's own model answers instead.
  *
  * @param {any} minimax - the MiniMax channel, if the caller injected one.
- * @returns {boolean} true when the channel is usable.
+ * @param {object} channelDeps - the channel dependencies.
+ * @returns {Promise<boolean>} true when the channel is usable.
  */
-function minimaxReady(minimax) {
-  if (minimax === undefined || minimax === null) return false;
-  if (typeof minimax.chat !== 'function') return false;
-  if (typeof minimax.isAvailable === 'function' && minimax.isAvailable() === false) return false;
+async function minimaxReady(minimax, channelDeps) {
+  if (minimax === undefined || minimax === null || typeof minimax.chat !== 'function') return false;
+  if (typeof minimax.isAvailable !== 'function') return true;
+  try {
+    return (await minimax.isAvailable(channelDeps)) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether the Host's own model can answer.
+ * @param {object} deps - the injected dependencies.
+ * @returns {boolean} true when `llm` and the default model are both mounted.
+ */
+function hostModelAvailable(deps) {
+  const llm = deps.llm;
+  const agentDefaultModel = deps.agentDefaultModel;
+  if (llm === undefined || llm === null || typeof llm.prepareCall !== 'function') return false;
+  if (agentDefaultModel === undefined || agentDefaultModel === null || typeof agentDefaultModel.currentSelection !== 'function') return false;
   return true;
 }
 
 /**
+ * The provider and model the Host's own model currently answers with.
+ * @param {object} deps - the injected dependencies.
+ * @returns {{provider: string, model: string}} the selection.
+ * @throws {Error} when the Host has no model selected.
+ */
+function hostSelection(deps) {
+  const agentDefaultModel = deps.agentDefaultModel;
+  if (agentDefaultModel === undefined || agentDefaultModel === null || typeof agentDefaultModel.currentSelection !== 'function') {
+    throw aiError(NO_MODEL_MESSAGE);
+  }
+  const selection = agentDefaultModel.currentSelection();
+  const provider = text(selection?.provider);
+  const model = text(selection?.model);
+  if (provider === '' || model === '') throw aiError(NO_MODEL_MESSAGE);
+  const reasoningEffort = text(selection?.reasoningEffort);
+  return { provider, model, reasoningEffort };
+}
+
+/**
+ * The Chinese sentence of a failure, for the combined message.
+ * @param {any} error - the thrown failure.
+ * @returns {string} the sentence, or a fallback.
+ */
+function reasonOf(error) {
+  const message = typeof error?.message === 'string' ? error.message.trim() : '';
+  return message === '' ? '未知原因' : message;
+}
+
+/**
+ * Whether a failure means the MiniMax key is dead.
+ * @param {any} error - the thrown failure.
+ * @returns {boolean} true when the key is the problem.
+ */
+function isKeyFailure(error) {
+  const code = typeof error?.code === 'string' ? error.code : '';
+  if (KEY_FAILURE_CODES.has(code)) return true;
+  return error?.status === 401 || error?.status === 403;
+}
+
+/**
+ * Build the failure both channels report: the learner gets an actionable
+ * Chinese sentence naming both causes, the developer gets `details`.
+ *
+ * @param {any} minimaxError - why MiniMax could not answer.
+ * @param {any} llmError - why the Host model could not answer either.
+ * @returns {Error} the combined failure.
+ */
+function bothChannelsFailed(minimaxError, llmError) {
+  const keyFailure = isKeyFailure(minimaxError);
+  const minimaxText = keyFailure
+    ? `MiniMax Key 失效（${reasonOf(minimaxError)}）`
+    : `MiniMax 通道不可用（${reasonOf(minimaxError)}）`;
+  const llmText = `宿主模型不可用（${reasonOf(llmError)}）`;
+  const error = aiError(`${minimaxText}，${llmText}`, llmError);
+  error.code = keyFailure ? 'AI_MINIMAX_KEY_INVALID' : 'AI_MINIMAX_UNAVAILABLE';
+  error.details = {
+    minimax: {
+      code: typeof minimaxError?.code === 'string' ? minimaxError.code : '',
+      status: typeof minimaxError?.status === 'number' ? minimaxError.status : 0,
+      providerCode: typeof minimaxError?.providerCode === 'number' ? minimaxError.providerCode : 0,
+    },
+    llm: {
+      code: typeof llmError?.code === 'string' ? llmError.code : '',
+      message: reasonOf(llmError).slice(0, 200),
+      provider: typeof llmError?.provider === 'string' ? llmError.provider : '',
+      model: typeof llmError?.model === 'string' ? llmError.model : '',
+      providerMessage: typeof llmError?.providerMessage === 'string' ? llmError.providerMessage : '',
+    },
+  };
+  return error;
+}
+
+/**
+ * Rebuild a failure from the channel's remembered last failure.
+ * @param {{code?: string, status?: number, providerCode?: number, message?: string}} failure - the remembered failure.
+ * @returns {Error} the failure.
+ */
+function failureFromSnapshot(failure) {
+  const error = new Error(typeof failure?.message === 'string' && failure.message !== '' ? failure.message : 'MiniMax 通道不支持当前请求');
+  if (typeof failure?.code === 'string' && failure.code !== '') error.code = failure.code;
+  if (typeof failure?.status === 'number' && failure.status > 0) error.status = failure.status;
+  if (typeof failure?.providerCode === 'number' && failure.providerCode !== 0) error.providerCode = failure.providerCode;
+  return error;
+}
+
+/**
+ * The failure of one request that ran out of its wall-clock budget.
+ * @param {number} timeoutMs - the budget.
+ * @param {any} cause - the underlying failure.
+ * @returns {Error} the failure.
+ */
+function timeoutFailure(timeoutMs, cause) {
+  return aiError(`AI 请求超时（${Math.max(1, Math.round(timeoutMs / 1000))} 秒），请稍后再试`, cause);
+}
+
+/**
  * Ask the MiniMax chat model for one completion.
+ *
+ * Provider failures keep their mapped Chinese message and their code: the
+ * caller decides whether to cool the channel down and fall back.
  *
  * @param {object} options - the call parameters.
  * @param {object} options.minimax - the MiniMax channel.
  * @param {string} options.system - the system prompt.
  * @param {string} options.user - the user prompt.
  * @param {number} options.maxTokens - the token cap.
+ * @param {object} options.channelDeps - the channel dependencies (credential store, state, signal, timeout).
  * @returns {Promise<string>} the model's answer.
  */
-async function completeWithMinimax({ minimax, system, user, maxTokens }) {
+async function completeWithMinimax({ minimax, system, user, maxTokens, channelDeps }) {
   try {
-    return await minimax.chat({ system, user, maxTokens });
+    return await minimax.chat({ system, user, maxTokens }, channelDeps);
   } catch (error) {
-    if (error?.name === 'AbortError') throw aiError('AI 请求已取消', error);
-    throw aiError(
-      error instanceof Error ? error.message : 'MiniMax 调用失败，请稍后重试',
-      error,
-    );
+    if (error?.name === 'AbortError') throw error;
+    if (typeof error?.code === 'string' && error.code !== '') throw error;
+    if (error instanceof Error && /[\u4e00-\u9fff]/.test(error.message)) throw error;
+    throw aiError(`MiniMax 调用失败：${reasonOf(error)}`, error);
   }
 }
 
 /**
  * Run one AI assist request.
  *
- * The MiniMax channel answers first when it is configured; the Host's own
- * model is the fallback, so the feature keeps working without a key.
+ * The MiniMax channel answers first when it is configured and healthy. Any
+ * runtime failure of that channel (bad key, quota, rate limit, 5xx, timeout,
+ * a model that no longer exists) cools the channel down and the same request
+ * immediately continues on the Host's own model. When the Host model fails too,
+ * the learner gets one actionable Chinese sentence naming both causes.
  *
  * @param {'word'|'translate'|'breakdown'} method - the method to run.
  * @param {object} payload - the method payload.
  * @param {object} [deps] - the injected dependencies.
  * @param {object} [deps.llm] - the Host's `llm` service.
  * @param {object} [deps.agentDefaultModel] - the Host's `agentDefaultModel` service.
+ * @param {object} [deps.credentials] - the Host's `credentials` service.
  * @param {object} [deps.minimax] - the MiniMax channel.
  * @param {number} [deps.timeoutMs] - the wall-clock budget of the request.
  * @returns {Promise<object>} the result, in the shape the contract freezes.
@@ -592,26 +788,11 @@ export async function runAiMethod(method, payload, deps = {}) {
 
   const request = spec.validate(payload);
 
-  const useMinimax = minimaxReady(deps.minimax);
-  const llm = deps.llm;
-  const agentDefaultModel = deps.agentDefaultModel;
-  if (!useMinimax && (llm === undefined || llm === null || typeof llm.prepareCall !== 'function')) {
-    throw aiError(NO_MODEL_MESSAGE);
-  }
-  if (!useMinimax && (agentDefaultModel === undefined || agentDefaultModel === null || typeof agentDefaultModel.currentSelection !== 'function')) {
-    throw aiError(NO_MODEL_MESSAGE);
-  }
-
-  let provider = '';
-  let model = '';
-  if (!useMinimax) {
-    const selection = agentDefaultModel.currentSelection();
-    provider = text(selection?.provider);
-    model = text(selection?.model);
-    if (provider === '' || model === '') throw aiError(NO_MODEL_MESSAGE);
-  }
-
-  const timeoutMs = Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0 ? deps.timeoutMs : DEFAULT_TIMEOUT_MS;
+  // A big generation (a chapter outline, a podcast script) needs more wall
+  // clock than a word sheet; the caller may still set the budget explicitly.
+  const defaultTimeoutMs = Number.isFinite(spec.timeoutMs) && spec.timeoutMs > 0 ? spec.timeoutMs : DEFAULT_TIMEOUT_MS;
+  const timeoutMs = Number.isFinite(deps.timeoutMs) && deps.timeoutMs > 0 ? deps.timeoutMs : defaultTimeoutMs;
+  const startedAt = Date.now();
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -619,39 +800,125 @@ export async function runAiMethod(method, payload, deps = {}) {
     controller.abort();
   }, timeoutMs);
 
-  // A method may build its own system prompt: the translation names the
-  // language the learner asked for.
-  const system = typeof spec.system === 'function' ? spec.system(request) : SYSTEM_PROMPTS[method];
-  const user = spec.user(request);
-  const call = { llm, provider, model, maxTokens: spec.maxTokens, user, signal: controller.signal };
-  const answerWith = (finalSystem) => (useMinimax
-    ? completeWithMinimax({ minimax: deps.minimax, system: finalSystem, user, maxTokens: spec.maxTokens })
-    : complete({ ...call, system: finalSystem }));
-
   try {
-    let answer;
-    try {
-      answer = await answerWith(system);
-    } catch (error) {
-      if (timedOut) throw aiError(`AI 请求超时（${Math.round(timeoutMs / 1000)} 秒），请稍后再试`, error);
-      if (error?.name === 'AbortError') throw aiError('AI 请求已取消', error);
-      throw aiError(modelErrorMessage(error), error);
-    }
+    // A method may build its own system prompt: the translation names the
+    // language the learner asked for.
+    const system = typeof spec.system === 'function' ? spec.system(request) : SYSTEM_PROMPTS[method];
+    const user = spec.user(request);
+    const minimax = deps.minimax;
+    const channelDeps = minimaxDeps(deps);
+    const hostAvailable = hostModelAvailable(deps);
+    const minimaxUsable = await minimaxReady(minimax, channelDeps);
+    if (!hostAvailable && !minimaxUsable) throw aiError(NO_MODEL_MESSAGE);
 
-    try {
-      return spec.normalize(parseModelJson(answer), request);
-    } catch (firstError) {
-      // The answer was not JSON: ask once more, with a stricter prompt.
-      let retryAnswer;
+    /**
+     * Ask the Host's own model.
+     * @param {string} finalSystem - the system prompt.
+     * @returns {Promise<string>} the answer.
+     */
+    const hostCall = async (finalSystem) => {
+      const selection = hostSelection(deps);
       try {
-        retryAnswer = await answerWith(`${system}\n只输出一个 JSON 对象。`);
+        return await complete({
+          llm: deps.llm,
+          provider: selection.provider,
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
+          system: finalSystem,
+          user,
+          maxTokens: spec.maxTokens,
+          signal: controller.signal,
+        });
       } catch (error) {
-        if (timedOut) throw aiError(`AI 请求超时（${Math.round(timeoutMs / 1000)} 秒），请稍后再试`, error);
+        if (timedOut) throw timeoutFailure(timeoutMs, error);
         if (error?.name === 'AbortError') throw aiError('AI 请求已取消', error);
-        throw aiError(modelErrorMessage(error), error);
+        const wrapped = aiError(modelErrorMessage(error), error);
+        if (typeof error?.code === 'string' && error.code !== '') wrapped.code = error.code;
+        // Who was asked, for the failure details: a model name is not a secret.
+        wrapped.provider = selection.provider;
+        wrapped.model = selection.model;
+        if (typeof error?.providerMessage === 'string' && error.providerMessage !== '') {
+          wrapped.providerMessage = error.providerMessage;
+        }
+        throw wrapped;
+      }
+    };
+
+    /**
+     * Ask MiniMax, within the budget left for it.
+     * @param {string} finalSystem - the system prompt.
+     * @returns {Promise<string>} the answer.
+     */
+    const minimaxCall = (finalSystem) => {
+      const remaining = timeoutMs - (Date.now() - startedAt);
+      const budget = Math.max(4000, Math.min(MINIMAX_BUDGET_MS, remaining));
+      return completeWithMinimax({
+        minimax,
+        system: finalSystem,
+        user,
+        maxTokens: spec.maxTokens,
+        channelDeps: { ...channelDeps, signal: controller.signal, timeoutMs: budget },
+      });
+    };
+
+    /**
+     * Continue the same request on the Host model after MiniMax failed.
+     * @param {string} finalSystem - the system prompt.
+     * @param {any} minimaxError - why MiniMax failed.
+     * @returns {Promise<string>} the answer.
+     */
+    const fallbackToHost = async (finalSystem, minimaxError) => {
+      if (!hostAvailable) throw bothChannelsFailed(minimaxError, aiError(NO_MODEL_MESSAGE));
+      try {
+        return await hostCall(finalSystem);
+      } catch (llmError) {
+        if (timedOut) throw timeoutFailure(timeoutMs, llmError);
+        throw bothChannelsFailed(minimaxError, llmError);
+      }
+    };
+
+    /**
+     * Run one attempt on one channel, with the fallback rules.
+     * @param {'minimax'|'host'} channel - the channel to try first.
+     * @param {string} finalSystem - the system prompt.
+     * @returns {Promise<{answer: string, channel: 'minimax'|'host'}>} the answer and the channel that gave it.
+     */
+    const attemptOn = async (channel, finalSystem) => {
+      if (channel === 'minimax') {
+        try {
+          return { answer: await minimaxCall(finalSystem), channel: 'minimax' };
+        } catch (error) {
+          if (timedOut) throw timeoutFailure(timeoutMs, error);
+          if (error?.name === 'AbortError') throw aiError('AI 请求已取消', error);
+          // The same request continues on the Host model: the channel is now
+          // cooling down, so every later request skips it for five minutes.
+          const answer = await fallbackToHost(finalSystem, error);
+          return { answer, channel: 'host' };
+        }
       }
       try {
-        return spec.normalize(parseModelJson(retryAnswer), request);
+        return { answer: await hostCall(finalSystem), channel: 'host' };
+      } catch (error) {
+        if (timedOut) throw error;
+        // MiniMax was skipped because it is cooling down: name both causes.
+        const snapshot = channelSnapshot(minimax, channelDeps);
+        if (snapshot !== null && snapshot.coolingDown === true && snapshot.lastFailure !== null) {
+          throw bothChannelsFailed(failureFromSnapshot(snapshot.lastFailure), error);
+        }
+        throw error;
+      }
+    };
+
+    const first = await attemptOn(minimaxUsable ? 'minimax' : 'host', system);
+
+    try {
+      return spec.normalize(parseModelJson(first.answer), request);
+    } catch (firstError) {
+      // The answer was not JSON: ask once more, with a stricter prompt, on the
+      // channel that answered.
+      const retry = await attemptOn(first.channel, `${system}\n只输出一个 JSON 对象。`);
+      try {
+        return spec.normalize(parseModelJson(retry.answer), request);
       } catch (secondError) {
         throw aiError(JSON_ERROR_MESSAGE, secondError ?? firstError);
       }

@@ -249,6 +249,8 @@ export function createRecorder(options) {
   let stream = null;
   let chunks = [];
   let recording = false;
+  let disposed = false;
+  let objectUrl = '';
 
   function defaultGetUserMedia() {
     const mediaDevices = readGlobal('navigator')?.mediaDevices;
@@ -286,7 +288,10 @@ export function createRecorder(options) {
     if (!mediaRecorderFactory && typeof MediaRecorderCtor !== 'function') {
       throw new Error('当前环境不支持录音');
     }
-    const gUM = injectedGetUserMedia || defaultGetUserMedia();
+    // The default helper returns a Promise, not the function itself. Keeping
+    // the call behind a function wrapper is what lets the real browser path
+    // reach getUserMedia instead of failing the typeof check.
+    const gUM = injectedGetUserMedia || (() => defaultGetUserMedia());
     if (typeof gUM !== 'function') {
       throw new Error('当前环境不支持录音');
     }
@@ -328,14 +333,25 @@ export function createRecorder(options) {
         blob = { type: mimeType, size: 0 };
       }
       const url = (injectedCreateObjectURL || defaultCreateObjectURL)(blob);
+      objectUrl = url;
       recording = false;
       releaseStream();
+      // Disposal during a pending stop means the reader has already gone:
+      // no transcription is started, and the temporary URL is not leaked.
+      if (disposed) {
+        if (url && typeof readGlobal('URL')?.revokeObjectURL === 'function') {
+          try { readGlobal('URL').revokeObjectURL(url); } catch { /* ignore */ }
+        }
+        objectUrl = '';
+        return;
+      }
       if (onStop) onStop(blob, url);
     };
     recorder.onerror = (event) => {
       recording = false;
+      releaseStream();
       const reason = event?.error?.message || event?.message || 'recording failed';
-      if (onError) onError(withCode(new Error('recording failed'), 'RECORD_FAILED', reason));
+      if (!disposed && onError) onError(withCode(new Error('recording failed'), 'RECORD_FAILED', reason));
     };
 
     try {
@@ -356,7 +372,23 @@ export function createRecorder(options) {
       recorder.stop();
     } catch {
       recording = false;
+      releaseStream();
     }
+  }
+
+  /** Stop the capture without starting a transcription, and release every resource. */
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    recording = false;
+    if (recorder) {
+      try { recorder.stop(); } catch { /* already stopped */ }
+    }
+    releaseStream();
+    if (objectUrl && typeof readGlobal('URL')?.revokeObjectURL === 'function') {
+      try { readGlobal('URL').revokeObjectURL(objectUrl); } catch { /* ignore */ }
+    }
+    objectUrl = '';
   }
 
   /** @returns {boolean} */
@@ -364,5 +396,5 @@ export function createRecorder(options) {
     return recording;
   }
 
-  return { start, stop, isRecording };
+  return { start, stop, dispose, isRecording };
 }

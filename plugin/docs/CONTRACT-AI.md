@@ -203,3 +203,88 @@ export function scheduleNext(entry, now = Date.now());  // 下次复习时间戳
 4. 面向用户的文案用中文；AI 相关失败必须给出可读中文提示，不能抛原始英文堆栈。
 5. 不得修改不属于自己写作用域的文件。
 6. 测试用 `node --test tests/xxx.test.mjs`（本机 `node --test tests/` 目录形式会失败）。
+
+---
+
+## 6. MiniMax 直连通道（2026-11-07 修订，对应 task-1 A–I）
+
+本节是对 §1 的补充，不改变 §1.3 冻结的返回结构，也不改变客户端读取 `status` 的方式。
+
+### 6.1 Key 解析阶梯与缓存
+
+`src/host/minimax.js` 不再只信任 `~/.dsh/reader/minimax.key`，按以下顺序找 Key，**每个候选先用一次免费探活请求校验**，第一个通过的胜出：
+
+1. 环境变量 `MINIMAX_API_KEY`（`source: 'env'`）
+2. 私有文件 `~/.dsh/reader/minimax.key`（可用 `READER_MINIMAX_KEY_FILE` 改路径，测试用）（`source: 'file'`）
+3. 宿主 `credentials` 服务，按 ref 顺序 `MINIMAX_API_KEY` → `MINIMAX_CN_API_KEY` → `MYMINIMAX_API_KEY`（`source: 'credentials'`）
+
+规则：
+
+- 探活接口是 `POST /v1/get_voice {voice_type:'all'}`：免费、不消耗 token；失效 Key 在它上面返回 HTTP 200 + `base_resp.status_code = 2049`。
+- 通过校验的 Key 与来源缓存在模块级 channel state 里，**TTL 10 分钟**；下一个请求直接读缓存，不会每次探活。
+- 运行期遇到 401/403/2049：立即作废该 Key，同一请求内继续走阶梯的下一个来源；阶梯全部被拒时返回映射后的中文错误并进入冷却。
+- 全阶梯都不可用时把「解析失败」负缓存 60 秒，避免每个请求都重新探活。
+
+### 6.2 冷却（5 分钟）与回退
+
+- 供应商侧确定性失败（401/403/2049、402/2067 额度、429、5xx、请求超时、模型下线 404/2069）→ channel 进入 **5 分钟冷却**，`lastFailure` 记住 `{code, status, providerCode, message}`。
+- 冷却期内 `status.minimax = false`；AI 方法**直接跳过 MiniMax**，用宿主 `llm` 作答；TTS/voices/asr/cover 没有宿主回退路径，返回可执行中文错误（`MINIMAX_COOLDOWN`，带剩余秒数与最近失败原因）。
+- 额度耗尽（`MINIMAX_QUOTA` / providerCode 2067）属于账号侧事实：充值或把新 Key 存进 credentials / key 文件后，下一步请求会按阶梯自动探到新 Key 并恢复，**不需要改代码、不需要重启应用**；恢复前 TTS 会持续返回该错误。
+- AI 方法运行期 MiniMax 失败时：同一请求立刻改用宿主 `llm`（`runAiMethod` 内完成，不重发 HTTP）。宿主 llm 也失败时返回一条同时点名两个通道的中文错误：
+  - Key 类失败 → `MiniMax Key 失效（…），宿主模型不可用（…）`，`details.code = AI_MINIMAX_KEY_INVALID`
+  - 其他通道失败 → `MiniMax 通道不可用（…），宿主模型不可用（…）`，`details.code = AI_MINIMAX_UNAVAILABLE`
+  - `details.details = { minimax: {code,status,providerCode}, llm: {code,message,provider,model,providerMessage} }`；原始 provider code/status 都保留。
+- 宿主 `llm` 调用**不强制 temperature / reasoningEffort 以外的采样参数**：`reasoningEffort` 跟随 `agentDefaultModel.currentSelection()`，temperature 交给路由默认（reasoning 路由可能只接受自己的温度，例如 k3 对非 1 温度回 400）。
+
+### 6.2.1 宿主 `llm` 的会话标识（2026-11-07 追加）
+
+插件从浏览器的 fetch 路由调用宿主 `llm`，这条路径上没有 Agent 轮次，也就没有 session id。按 session 路由的 provider（当前默认模型 `opencode-go` 就是一个）会直接拒绝这种请求：
+
+```
+400 {"type":"MissingSessionID","message":"Request is missing x-opencode-session and cannot be routed efficiently."}
+```
+
+所以 `src/host/ai.js` 在 stream 请求里带一个**进程级的稳定合成 id**（`reader-assist-<uuid>`，模块加载时生成一次，所有请求复用）。`prepared.stream()` 的 config 校验不比较 `sessionId`，所以它能安全地挂在 prepared 请求上。不要在每次请求里新生成 id：那会让每次查词落到一个新的路由桶里。
+
+验收：默认模型为 `opencode-go/deepseek-v4.1-flash`、MiniMax 额度耗尽（402/2067）时，`word`/`translate`/`breakdown`/`mindmap`/`podcast` 仍通过宿主模型返回 `ok`（实测 5.6s / 3.1s / 10.5s / 13.8s / 34.6s）。
+
+### 6.3 模型
+
+- `CHAT_MODEL = 'MiniMax-M3.1-Flash'`（`MiniMax-Text-01` 已被供应商下线，404/2069）。
+- `TTS_MODEL = 'speech-02-hd'`，`ASR_MODEL = 'asr-1.0'`，`IMAGE_MODEL = 'image-01'`。
+- ASR 的浏览器录音先经 `src/host/audio.js` 转为 16kHz / mono / PCM16 WAV（ffmpeg；RIFF/WAV 直接透传），再以 `audio/wav` 提交 `/speech_to_text`。MiniMax 不支持 `matroska/webm`（2013），不能直接上传 MediaRecorder 的 WebM。
+- 每个 AI 方法的请求预算：word 60s、translate/breakdown/mindmap 90s、podcast 180s、podcastReply 120s；`deps.timeoutMs` 仍可覆盖。回退到宿主 reasoning 模型时单次生成可能接近 60s（实测 translate 52s），预算按最慢回退路径留足。
+
+### 6.4 `status` 契约（客户端字段不变，新字段可忽略）
+
+```js
+{
+  minimax: boolean,            // Key 通过探活且通道不在冷却
+  source: 'env' | 'file' | 'credentials' | 'none',
+  chatModel: string,           // 真实在用的型号，不再谎报 MiniMax-Text-01
+  ttsModel: string,
+  reason?: string,             // 不可用时的人话原因（Key 不可用 / 探活不可达 / 冷却中）
+}
+```
+
+### 6.5 错误映射
+
+| 供应商事实 | `code` | 中文提示（节选） |
+|---|---|---|
+| 401/403、`authorized_error`、body 2049/1004 | `MINIMAX_INVALID_KEY` | MiniMax API Key 无效或已失效，请更新 MINIMAX_API_KEY |
+| 402、`insufficient_balance_error`、body 2067/1008 | `MINIMAX_QUOTA` | MiniMax 账户额度已用尽（Token Plan 用量上限或余额不足），请充值或更换 API Key |
+| 429、`rate_limit_error`、body 1002 | `MINIMAX_RATE_LIMIT` | MiniMax 请求频率超限，请稍后再试 |
+| 404 模型下线、body 2069 | `MINIMAX_MODEL_UNAVAILABLE` | MiniMax 模型不可用（模型名可能已下线），请更新模型配置 |
+| 5xx、body 1013 | `MINIMAX_UNAVAILABLE` | MiniMax 服务暂时不可用，请稍后再试 |
+| 超时 / 网络不可达 | `MINIMAX_TIMEOUT` / `MINIMAX_NETWORK` | MiniMax 请求超时（n 秒）/ 无法连接 MiniMax 服务 |
+| 冷却期 | `MINIMAX_COOLDOWN` | MiniMax 通道临时不可用（最近失败：…）；约 n 秒后自动恢复 |
+
+### 6.6 测试
+
+```bash
+cd reader
+node --max-old-space-size=2048 --test tests/ai.test.mjs tests/minimax.test.mjs
+node --max-old-space-size=2048 --test "tests/*.test.mjs"   # Node 22 必须显式 glob
+```
+
+`tests/minimax.test.mjs` 全程用假 fetch + 独立 channel state，不触网；覆盖阶梯、探活、TTL 缓存、运行期换 Key、冷却、错误映射、TTS/voices/asr/cover。`tests/ai.test.mjs` 覆盖 MiniMax 优先、401/404 回退宿主 llm、双通道失败文案与 details、冷却跳过、JSON 重试、status 路由。

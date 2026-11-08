@@ -19,6 +19,7 @@ import { OnlineLibrary } from './online-library.js';
 import { ReaderView } from './reader.js';
 import { SourcePreview } from './source-preview.js';
 import { WordList } from './wordlist.js';
+import { loadSession, saveSession } from '../lib/session.js';
 
 
 /**
@@ -548,6 +549,26 @@ export function EnglishReaderPage({ t, build }) {
   }, [openBook]);
 
   // Leaving the book: the reading time is flushed by the reader on unmount.
+  // Coming back from another plugin: the shell has unmounted this panel, so
+  // the book and the section are restored from the last screen record. The
+  // reading position comes from the book's own progress, so it lands where
+  // the learner stopped.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    restoredRef.current = true;
+    const session = loadSession();
+    if (session.bookId !== null) {
+      void openBook(session.bookId).catch(() => {});
+      return;
+    }
+    if (session.tab !== 'library') setTab(session.tab);
+  }, [openBook]);
+
+  useEffect(() => {
+    saveSession({ tab, bookId: activeBookId });
+  }, [tab, activeBookId]);
+
   const closeBook = useCallback(() => {
     setActiveBookId(null);
     setUnits([]);
@@ -736,11 +757,20 @@ export function EnglishReaderPage({ t, build }) {
     { id: 'vocab', label: t('tab.vocab') },
   ];
 
+  // While a book is being read the page belongs to the text: the tab bar is
+  // only a way in and out, and the reading bar already carries the way back.
+  const readingBook = tab === 'reader' && activeBook !== null;
+  const pageClasses = [
+    'er-page',
+    importProgress === null && importCardResult === null ? null : 'is-importing',
+    readingBook ? 'is-reading' : null,
+  ].filter(Boolean).join(' ');
+
   return h(
     'div',
     {
       // The import card floats over the body, so the body gets room for it.
-      className: importProgress === null && importCardResult === null ? 'er-page' : 'er-page is-importing',
+      className: pageClasses,
       onDragOver: (event) => { event.preventDefault(); },
       onDrop: (event) => {
         event.preventDefault();
@@ -748,19 +778,26 @@ export function EnglishReaderPage({ t, build }) {
         if (dropped.length > 0) void onFiles(dropped);
       },
     },
-    h(
+    readingBook ? null : h(
       'div',
       { className: 'er-appbar' },
       h(
         'div',
         { className: 'er-appbar-left' },
-        h('button', { type: 'button', className: 'er-round-button', title: t('library.import'), onClick: pickFile }, h(ImportIcon, { size: 16 })),
+        h('button', {
+          type: 'button',
+          className: 'er-round-button',
+          title: t('library.import'),
+          'aria-label': t('library.import'),
+          onClick: pickFile,
+        }, h(ImportIcon, { size: 16 })),
         h(
           'button',
           {
             type: 'button',
             className: 'er-round-button',
             title: t('source.title'),
+            'aria-label': t('source.title'),
             onClick: () => { setSourceOpen(true); },
           },
           h(GlobeIcon, { size: 16 }),
@@ -797,6 +834,9 @@ export function EnglishReaderPage({ t, build }) {
             type: 'button',
             className: 'er-round-button',
             title: t('library.shelfMenu'),
+            'aria-label': t('library.shelfMenu'),
+            'aria-haspopup': 'menu',
+            'aria-expanded': menuOpen,
             onClick: () => { setMenuOpen((value) => !value); },
           },
           h(MoreIcon, { size: 16 }),

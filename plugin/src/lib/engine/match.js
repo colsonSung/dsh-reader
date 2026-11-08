@@ -159,7 +159,7 @@ export function diffWords(target, spoken) {
     .filter(Boolean);
 
   const ops = alignWords(targetWords, spokenWords);
-  /** @type {{ word: string, status: 'ok'|'wrong'|'missing'|'extra' }[]} */
+  /** @type {{ word: string, status: 'ok'|'wrong'|'missing'|'extra', heard?: string }[]} */
   const words = [];
   /** @type {string[]} */
   const extras = [];
@@ -171,7 +171,9 @@ export function diffWords(target, spoken) {
       words.push({ word: targetWords[op.t], status: 'ok' });
       matched += 1;
     } else if (op.type === 'sub') {
-      words.push({ word: targetWords[op.t], status: 'wrong' });
+      // What the learner actually said travels with the verdict: the review
+      // can show "you said this" next to the word that was read wrong.
+      words.push({ word: targetWords[op.t], status: 'wrong', heard: spokenWords[op.s] });
     } else if (op.type === 'del') {
       words.push({ word: targetWords[op.t], status: 'missing' });
       missing += 1;

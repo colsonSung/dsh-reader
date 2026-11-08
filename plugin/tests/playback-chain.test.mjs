@@ -49,11 +49,15 @@ const units = [
  * A speech synthesis that ends every utterance right away: the chain of the
  * read-aloud is what this test is about, not the timing of the speech.
  */
-function installFakeSpeech() {
+function installFakeSpeech(options = {}) {
+  // A held utterance never ends: the test can then look at the state the
+  // reader shows while the speech is still running.
+  const autoEnd = options.autoEnd !== false
   const spoken = []
   globalThis.speechSynthesis = {
     speak(utterance) {
       spoken.push(utterance.text)
+      if (!autoEnd) return
       setTimeout(() => {
         if (typeof utterance.onend === 'function') utterance.onend()
       }, 0)
@@ -108,7 +112,7 @@ async function settle(rounds = 6) {
  */
 async function renderReader(options = {}) {
   const { ReaderView } = await import('../src/ui/reader.js')
-  const spoken = installFakeSpeech()
+  const spoken = installFakeSpeech({ autoEnd: options.holdSpeech !== true })
   const moves = []
   const container = dom.window.document.createElement('div')
   dom.window.document.body.appendChild(container)
@@ -136,10 +140,15 @@ function playButton(container) {
   return container.querySelector('.er-read-foot .er-btn-primary')
 }
 
-/** The button that turns the page. */
+/**
+ * The button that turns the page. It lives in the bar of the active mode: the
+ * player while reading, the practice bar while typing or speaking.
+ *
+ * @param {Element} container - the rendered reader
+ * @returns {Element|undefined} the next button of the current bottom bar
+ */
 function nextButton(container) {
-  return [...container.querySelectorAll('.er-read-foot .er-btn-icon')]
-    .find((button) => button.getAttribute('title') === 'reader.next')
+  return container.querySelector('[data-nav="next"]')
 }
 
 test('the read-aloud walks the range paragraph by paragraph', async () => {
@@ -216,8 +225,7 @@ test('the learner moving the reader stops the reading', async () => {
   await act(async () => { playButton(container).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await settle(2)
 
-  const next = [...container.querySelectorAll('.er-read-foot .er-btn-icon')]
-    .find((button) => button.getAttribute('title') === 'reader.next')
+  const next = nextButton(container)
   assert.ok(next, 'the next button must exist')
   await act(async () => { next.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await settle(4)
@@ -275,6 +283,29 @@ test('the auto-play stays quiet while the learner is the one talking', async () 
 
   assert.deepEqual(spoken, [], 'the machine does not talk over the learner')
   await act(async () => { root.unmount() })
+})
+
+test('the typing bar carries the read-aloud state instead of a floating pill', async () => {
+  // The speech is held open: the state row only exists while the reading runs.
+  const { container, root } = await renderReader({ holdSpeech: true })
+  await switchToTyping(container)
+
+  // "Listen once" is the typing mode's own play button, now that the player
+  // bar belongs to the reading mode.
+  const hearOnce = container.querySelector('.er-mode-dock [title="reader.listenOnce"]')
+  assert.ok(hearOnce, 'the typing bar offers listening once')
+  await act(async () => { hearOnce.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await settle(2)
+
+  // The state row lives inside the typing bar: a floating pill would cover the
+  // word input, and on a phone there would be no player under it at all.
+  const statuses = container.querySelectorAll('.er-play-status')
+  assert.equal(statuses.length, 1, 'the read-aloud state is shown once, not twice')
+  assert.ok(statuses[0].closest('.er-mode-dock'), 'the state is a row of the typing bar')
+  assert.ok(statuses[0].querySelector('.er-play-status-pause'), 'the typing bar can pause the read-aloud')
+
+  await act(async () => { root.unmount() })
+  await settle(4)
 })
 
 /** Switch the reader into the typing mode. */

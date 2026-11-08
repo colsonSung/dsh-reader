@@ -31,24 +31,29 @@ import { blobToBase64, speakWord } from '../lib/speech.js';
 import { DEFAULT_TRANSLATION_LANGUAGE, TRANSLATION_LANGUAGES } from '../lib/languages.js';
 import { speakCached, warmAudio } from '../lib/tts-cache.js';
 import { createDeadline, describePlayback, nextStep, resolveSegments } from '../lib/playback.js';
+import { analyzeRecording } from '../lib/audio-analysis.js';
+import { buildSpeechFeedback } from '../lib/speech-feedback.js';
 import { addNote, listNotes, removeNote } from '../lib/notes.js';
 import { listPodcasts, removePodcast, savePodcast } from '../lib/podcasts.js';
 import { NotesPanel } from './notes.js';
 import { MindMapView } from './mindmap.js';
 import { PodcastView } from './podcast.js';
 import {
-  ClozeIcon, CloseIcon, ExitIcon, GlobeIcon, HighlighterIcon, KeyboardIcon, ListIcon, MicIcon, MindMapIcon,
+  ClozeIcon, CloseIcon, ExitIcon, GlobeIcon, HighlighterIcon, KeyboardIcon, LearningIcon, ListIcon, MicIcon, MindMapIcon,
   NextIcon, NoteIcon, PauseIcon, PencilIcon, PlayIcon, PodcastIcon, PrevIcon, RepeatIcon,
-  SettingsIcon, SoundIcon, TrashIcon, TranslateIcon,
+  MutedIcon, SettingsIcon, SoundIcon, TrashIcon, TranslateIcon, WaveIcon,
 } from './icons.js';
 import { WordCard } from './wordcard.js';
 import { Modal } from './library.js';
+import { useKeyboardInset, useViewportKind } from './responsive.js';
 
 const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
 /** How many paragraphs one reading page holds. */
 const PAGE_PARAGRAPHS = 6;
 /** The fewest paragraphs a page may hold on a small window. */
-const MIN_PAGE_PARAGRAPHS = 3;
+const MIN_PAGE_PARAGRAPHS = 2;
+/** Overflow below this (px) is tolerated with a fade instead of dropping a paragraph. */
+const CLIP_TOLERANCE_PX = 24;
 /** The most paragraphs a page may hold, however tall the window is. */
 const MAX_PAGE_PARAGRAPHS = 40;
 
@@ -114,6 +119,22 @@ const DEFAULT_TYPING_SETTINGS = {
   ],
 };
 
+/**
+ * The column width actually used, given the setting and how wide the panel is.
+ *
+ * The default measure is 68 characters — the one the eye follows without
+ * losing its place — but on a 27-inch window that is a sliver of the screen.
+ * While the learner keeps the default, the measure grows with the panel; an
+ * explicit narrow / wide / full choice is never overridden.
+ */
+function effectiveColumnWidth(kind, panelWidth) {
+  const chosen = COLUMN_WIDTHS[kind] ?? COLUMN_WIDTHS.normal;
+  if (kind !== 'normal') return chosen;
+  if (panelWidth >= 2200) return '96ch';
+  if (panelWidth >= 1600) return '88ch';
+  return chosen;
+}
+
 /** How wide the reading column may grow, in characters per line. */
 const COLUMN_WIDTHS = {
   narrow: '62ch',
@@ -123,8 +144,9 @@ const COLUMN_WIDTHS = {
   normal: '68ch',
   wide: '92ch',
   // Fill the reading area. The lines get long, which is a trade the learner
-  // makes on purpose.
-  full: 'none',
+  // makes on purpose. A large `ch` measure (rather than `none`) keeps the
+  // `calc()` around it valid; the 100% cap does the actual filling.
+  full: '200ch',
 };
 
 const FONT_FAMILIES = {
@@ -486,7 +508,7 @@ function joinWords(words) {
  * @param {object[]} practiceWords
  * @returns {(string|null)[]} one state per practice word
  */
-function alignSpokenWords(resultWords, practiceWords) {
+export function alignSpokenWords(resultWords, practiceWords) {
   const states = new Array(practiceWords.length).fill(null);
   let cursor = 0;
   for (const entry of resultWords ?? []) {
@@ -500,7 +522,9 @@ function alignSpokenWords(resultWords, practiceWords) {
       }
     }
     if (found < 0) continue;
-    states[found] = entry.status === 'ok' ? 'ok' : 'bad';
+    // A word that was not said at all is not a wrong word: the null state is
+    // what paints the "missed" mark in the passage.
+    states[found] = entry.status === 'ok' ? 'ok' : entry.status === 'missing' ? null : 'bad';
     cursor = found + 1;
   }
   return states;
@@ -530,10 +554,21 @@ export function ReaderView({
   const [transcript, setTranscript] = useState('');
   const [spokenResult, setSpokenResult] = useState(null);
   const [audioUrl, setAudioUrl] = useState('');
+  const audioUrlRef = useRef('');
+  const [asrPending, setAsrPending] = useState(false);
+  const [asrDone, setAsrDone] = useState(false);
+  const [speechCapture, setSpeechCapture] = useState('');
+  const [captureStartedAt, setCaptureStartedAt] = useState(0);
+  const [captureElapsed, setCaptureElapsed] = useState(0);
+  const [speechFeedback, setSpeechFeedback] = useState(null);
   const [ttsNote, setTtsNote] = useState('');
   const [card, setCard] = useState(null);
   const activeRef = useRef(null);
   const [vocabEntries, setVocabEntries] = useState({});
+  // The overlays are rendered outside the panel, so they cannot answer to a
+  // container query: they pick their shape from the viewport instead.
+  const viewportKind = useViewportKind();
+  const phone = viewportKind === 'phone';
 
   // Typing state, in the "Type to Learn" model: one word at a time.
   const [wordIndex, setWordIndex] = useState(0);
@@ -542,6 +577,18 @@ export function ReaderView({
   const [startedAt, setStartedAt] = useState(0);
   const [muted, setMuted] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Immersive reading keeps the mode strip out of the layout; the button in
+  // the bar pins it open for touch screens, where there is no hover.
+  const [modesOpen, setModesOpen] = useState(false);
+  const modesToggleRef = useRef(null);
+  // The quick typography panel: font, size and leading without opening the
+  // full settings sheet.
+  const [typographyOpen, setTypographyOpen] = useState(false);
+  // The magnetic rail is driven by a fixed edge handle, not by :hover on the
+  // moving panel: a panel that slides out from under the pointer flickers.
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const typographyAnchorRef = useRef(null);
+  const typographyPanelRef = useRef(null);
   // Reading-surface switches, the "Learning Modes" panel of the reference app.
   const [modes, setModes] = useState({
     highlight: true,   // colour the saved words by their state
@@ -553,6 +600,9 @@ export function ReaderView({
   });
   const [modePanelOpen, setModePanelOpen] = useState(false);
   const [tocOpen, setTocOpen] = useState(false);
+  // The read-aloud review: the word-by-word verdict lives in the passage, the
+  // voice, intonation and pronunciation analysis lives in this panel.
+  const [analysisOpen, setAnalysisOpen] = useState(false);
   const [translations, setTranslations] = useState({});
   const [revealed, setRevealed] = useState({});
   const [lookupsUsed, setLookupsUsed] = useState(0);
@@ -593,15 +643,24 @@ export function ReaderView({
   const [rate, setRate] = useState(1);
   const [spokenWord, setSpokenWord] = useState(-1);
   const [playing, setPlaying] = useState(false);
+  // A pause keeps the playback session alive, so the player can resume from the
+  // same sentence instead of starting the paragraph again.
+  const [playbackPaused, setPlaybackPaused] = useState(false);
   // The reader's notes: they live in the local database.
   const [notesOpen, setNotesOpen] = useState(false);
   // How many paragraphs the page holds: it fills the window instead of
   // leaving a large empty area below the text.
   const [pageSize, setPageSize] = useState(PAGE_PARAGRAPHS);
+  // How much of the text window's bottom edge is a fade instead of a cut:
+  // a page that overflows by a few pixels is softened, not sliced.
+  const [clipFade, setClipFade] = useState(0);
   // Bumped when the window changes size, so the page is measured again.
   const [measureToken, setMeasureToken] = useState(0);
-  const readBodyRef = useRef(null);
   const readingRef = useRef(null);
+  // The paper keeps its frame; only the text inside it scrolls. This is that
+  // window.
+  const readingScrollRef = useRef(null);
+  const readerRef = useRef(null);
   const [noteCount, setNoteCount] = useState(0);
   // Bumped whenever a note is written, so the badge follows at once.
   const [notesVersion, setNotesVersion] = useState(0);
@@ -665,8 +724,15 @@ export function ReaderView({
 
   const recognizerRef = useRef(null);
   const recorderRef = useRef(null);
+  // Every recording owns an attempt id. A late ASR response may update only
+  // the attempt that created it, never the sentence the learner moved to.
+  const speechAttemptRef = useRef(0);
   const transcriptRef = useRef('');
   const wordInputRef = useRef(null);
+  // On a phone the keyboard covers the bottom of the layout viewport. The
+  // reader subtracts that height from itself, so the typing panel stays above
+  // the keyboard instead of behind it.
+  useKeyboardInset(wordInputRef);
 
   // 云端音色：宿主报告 MiniMax 可用时拉一次音色表，并默认选一个
   const [cloudReady, setCloudReady] = useState(false);
@@ -770,12 +836,48 @@ export function ReaderView({
     return () => { synth.removeEventListener?.('voiceschanged', refresh); };
   }, [tts]);
 
+  const updateAudioUrl = useCallback((next) => {
+    const previous = audioUrlRef.current;
+    if (previous && previous !== next && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try { URL.revokeObjectURL(previous); } catch { /* already revoked */ }
+    }
+    audioUrlRef.current = next;
+    setAudioUrl(next);
+  }, []);
+
+  const resetSpokenPractice = useCallback(() => {
+    speechAttemptRef.current += 1;
+    setSpokenResult(null);
+    setTranscript('');
+    setInterim('');
+    setAsrDone(false);
+    setSpeechFeedback(null);
+    updateAudioUrl('');
+  }, [updateAudioUrl]);
+
   // Leaving the reader stops every sound it started.
   useEffect(() => () => {
     tts.cancel();
     sync.stop();
     recognizerRef.current?.abort?.();
+    recorderRef.current?.dispose?.();
+    interjectRecorderRef.current?.dispose?.();
+    if (audioUrlRef.current && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      try { URL.revokeObjectURL(audioUrlRef.current); } catch { /* already revoked */ }
+    }
   }, [tts, sync]);
+
+  // The recording clock is real elapsed time. It stops as soon as capture does.
+  useEffect(() => {
+    if (!speaking || captureStartedAt === 0) {
+      setCaptureElapsed(0);
+      return undefined;
+    }
+    const tick = () => { setCaptureElapsed(Math.max(0, Math.floor((Date.now() - captureStartedAt) / 1000))); };
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => { clearInterval(timer); };
+  }, [speaking, captureStartedAt]);
 
   // Reading activity: minutes read and words read, flushed to the shelf.
   const activityRef = useRef({ ms: 0, wordsUpTo: 0 });
@@ -933,6 +1035,7 @@ export function ReaderView({
     deadlineRef.current?.reset();
     playbackAnchorRef.current = -1;
     setPlaying(false);
+    setPlaybackPaused(false);
     setSpokenWord(-1);
     if (playedRef.current.since !== 0) {
       playedRef.current.ms += Date.now() - playedRef.current.since;
@@ -943,9 +1046,28 @@ export function ReaderView({
   }, []);
 
   const stopSpeaking = useCallback(() => {
+    speechAttemptRef.current += 1;
     tts.cancel();
+    recognizerRef.current?.abort?.();
+    recorderRef.current?.dispose?.();
+    recorderRef.current = null;
+    setSpeaking(false);
+    setSpeechCapture('');
+    setCaptureStartedAt(0);
+    setAsrPending(false);
+    setPlaybackPaused(false);
     endPlayback();
   }, [tts, endPlayback]);
+
+  const pausePlayback = useCallback(() => {
+    tts.pause();
+    setPlaybackPaused(true);
+  }, [tts]);
+
+  const resumePlayback = useCallback(() => {
+    tts.resume();
+    setPlaybackPaused(false);
+  }, [tts]);
 
   const practiceKey = scope === 'paragraph'
     ? `p${currentParagraphIndex}`
@@ -999,54 +1121,82 @@ export function ReaderView({
     return { start, end, groups: paragraphs.slice(start, end) };
   }, [paragraphs, currentParagraphIndex, pageSize]);
 
-  // Fill the window: add paragraphs while there is room, drop back when the
-  // text no longer fits.
+  // Fit the page to the paper: add paragraphs while there is room, drop one
+  // when the text no longer fits.
   //
-  // The size must settle: growing and shrinking again and again makes the
-  // text jump under the reader's eyes. So the largest size that fitted is
-  // remembered, and once a size does not fit the search stops.
-  const bestSizeRef = useRef(PAGE_PARAGRAPHS);
-  const overflowRef = useRef(false);
+  // The paper has a fixed height now, so a page that does not fit is a page
+  // whose last line gets sliced by the paper's edge. Shrinking until the page
+  // fits is what keeps the sheet clean; when even the minimum does not fit
+  // (a huge font, a tiny window) the text scrolls inside the frame.
+  // The search keeps the largest page that fitted (bestFit), probes one
+  // paragraph above it, and steps back as soon as the probe overflows. Without
+  // the remembered best fit a page that overflows by two pixels would drop a
+  // whole paragraph and never come back.
+  const bestFitRef = useRef(0);
+  const probingRef = useRef(false);
+  const settledRef = useRef(false);
   const layoutKeyRef = useRef('');
   useEffect(() => {
-    const body = readBodyRef.current;
-    const reading = readingRef.current;
-    if (body === null || reading === null) return;
+    const scroll = readingScrollRef.current;
+    if (scroll === null) return;
     const key = `${settings.fontSize}|${settings.lineHeight}|${scope}|${mode}|${measureToken}`;
     if (layoutKeyRef.current !== key) {
       layoutKeyRef.current = key;
-      bestSizeRef.current = PAGE_PARAGRAPHS;
-      overflowRef.current = false;
+      bestFitRef.current = 0;
+      probingRef.current = false;
+      settledRef.current = false;
     }
-    const available = body.clientHeight;
-    const used = reading.scrollHeight;
+    // The paper frame is fixed, so the room a page has is the window inside
+    // it: the text fills that window, the sheet never grows.
+    const available = scroll.clientHeight;
+    const used = scroll.scrollHeight;
     if (available < 120) return;
-    if (used > available) {
-      // This size does not fit: go back to the last one that did.
-      if (pageSize > bestSizeRef.current) {
-        setPageSize(bestSizeRef.current);
+    const overflow = used - available;
+    // A few missing pixels are the last line's descenders, not a reason to
+    // throw a whole paragraph away: only a real overflow drops one, and any
+    // overflow that stays is faded out at the paper's edge.
+    // The fade covers the cut line, not just the overflow: a few pixels of a
+    // glyph fading out still reads as a rendered line, so the softened band
+    // follows the line box the text is set in.
+    const linePx = Number.parseFloat(window.getComputedStyle(scroll).lineHeight) || 32;
+    setClipFade(overflow > 1 ? Math.min(Math.round(overflow) + 4, linePx) : 0);
+
+    if (overflow > CLIP_TOLERANCE_PX) {
+      // The probe went one paragraph too far: go back to the best fit.
+      if (probingRef.current && bestFitRef.current > 0) {
+        setPageSize(bestFitRef.current);
+        probingRef.current = false;
+        settledRef.current = true;
+        return;
       }
-      overflowRef.current = true;
+      if (pageSize > MIN_PAGE_PARAGRAPHS) {
+        setPageSize(pageSize - 1);
+        return;
+      }
+      // Even the smallest page does not fit: the text scrolls inside the paper.
+      settledRef.current = true;
       return;
     }
-    if (overflowRef.current) return;
+
+    bestFitRef.current = Math.max(bestFitRef.current, pageSize);
+    if (settledRef.current) return;
     if (used + 60 < available && pageSize < MAX_PAGE_PARAGRAPHS) {
-      bestSizeRef.current = pageSize;
-      setPageSize((value) => Math.min(MAX_PAGE_PARAGRAPHS, value + 1));
+      probingRef.current = true;
+      setPageSize(pageSize + 1);
       return;
     }
-    // It fits: the page is full, stop adjusting.
-    bestSizeRef.current = pageSize;
-    overflowRef.current = true;
+    settledRef.current = true;
   }, [pageSize, pageRange.end, measureToken, settings.fontSize, settings.lineHeight, scope, mode]);
 
   // A window that changes size asks for a new measurement. It must not reset
   // the page size: that update would cancel the one that fills the window.
+  // The paper is measured, not the scrolling text: the frame is what decides
+  // how much room a page has.
   useEffect(() => {
-    const body = readBodyRef.current;
-    if (body === null || typeof ResizeObserver === 'undefined') return undefined;
+    const paper = readingRef.current;
+    if (paper === null || typeof ResizeObserver === 'undefined') return undefined;
     const observer = new ResizeObserver(() => { setMeasureToken((value) => value + 1); });
-    observer.observe(body, { box: 'border-box' });
+    observer.observe(paper, { box: 'border-box' });
     return () => { observer.disconnect(); };
   }, []);
 
@@ -1145,6 +1295,23 @@ export function ReaderView({
     return map;
   }, [practice.words]);
 
+  // A word that was read wrong carries what was actually said, so the passage
+  // itself can tell the learner "you said this" without opening a panel.
+  const heardByDisplay = useMemo(() => {
+    if (mode !== 'speak' || spokenResult === null) return null;
+    const map = new Map();
+    let target = 0;
+    for (const entry of spokenResult.words ?? []) {
+      if (entry.status === 'extra') continue;
+      const word = practice.words[target];
+      if (word !== undefined && entry.status === 'wrong' && typeof entry.heard === 'string') {
+        map.set(word.displayIndex, entry.heard);
+      }
+      target += 1;
+    }
+    return map;
+  }, [mode, spokenResult, practice.words]);
+
   const activeEntry = paragraph.entries.find((entry) => entry.unitIndex === index);
   const sentencePosition = activeEntry === undefined ? 0 : activeEntry.sentencePosition;
   const sentenceTotal = paragraph.entries.length;
@@ -1162,6 +1329,12 @@ export function ReaderView({
     setInterim('');
     setSpokenResult(null);
     setAudioUrl('');
+    // The verdict of the old sentence is not the verdict of the new one: the
+    // "recognized" mark, the pronunciation feedback and a pending recognition
+    // all belong to the unit they were produced for.
+    setAsrPending(false);
+    setAsrDone(false);
+    setSpeechFeedback(null);
   }, [practiceKey, currentParagraphIndex]);
 
   // The practice unit changed: the reading of the old unit stops. The
@@ -1787,8 +1960,36 @@ export function ReaderView({
     };
   }, [playPanelOpen]);
 
+  useEffect(() => {
+    if (!typographyOpen) return undefined;
+    const onPointerDown = (event) => {
+      const target = event.target;
+      if (typographyPanelRef.current?.contains?.(target)) return;
+      if (typographyAnchorRef.current?.contains?.(target)) return;
+      setTypographyOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setTypographyOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [typographyOpen]);
+
+  const typographyPanelStyle = useMemo(() => {
+    const rect = typographyAnchorRef.current?.getBoundingClientRect?.();
+    if (rect === undefined || rect === null) return { right: 16, top: 64 };
+    const width = 320;
+    const left = Math.max(12, Math.min(rect.right - width, window.innerWidth - width - 12));
+    return { left, top: Math.round(rect.bottom + 8), width };
+  }, [typographyOpen]);
+
   // Where the panel sits: above the transport bar, and always inside the window.
   const playPanelStyle = useMemo(() => {
+    if (phone) return undefined;
     const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
     const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
     const width = Math.min(300, Math.max(220, viewportWidth - 24));
@@ -1806,7 +2007,7 @@ export function ReaderView({
     const centre = playAnchorRect.left + (playAnchorRect.width ?? 32) / 2;
     const arrow = Math.max(16, Math.min(centre - left - 5, width - 26));
     return { left, bottom, width, '--er-play-arrow': `${arrow}px` };
-  }, [playAnchorRect]);
+  }, [playAnchorRect, phone]);
 
   // The name of the range the learner picked.
   const playScopeLabel = useMemo(() => {
@@ -1906,7 +2107,9 @@ export function ReaderView({
         if (playbackRef.current.token !== token) return;
         const step = stepAfter(segmentIndex, pass);
         if (step.done) {
-          endPlayback(t('reader.playFinished'));
+          // Finishing is the expected end of playback, not news: the player
+          // simply returns to Play. Only failures are reported.
+          endPlayback('');
           return;
         }
         speakSegmentRef.current?.(step.segmentIndex, step.pass, token);
@@ -2007,7 +2210,24 @@ export function ReaderView({
     }
     const sentence = paragraph.entries[word.sentencePosition]?.unit.text ?? '';
     setLookupsUsed((value) => value + 1);
-    setCard({ word: word.text, sentence, x: event.clientX, y: event.clientY });
+    // The card is placed against the word and the sentence in the page, not
+    // against the pointer: a floating card that covers the sentence it is
+    // explaining is worse than no card.
+    const anchorElement = event?.currentTarget ?? null;
+    const closestOf = (selector) => (typeof anchorElement?.closest === 'function'
+      ? anchorElement.closest(selector)
+      : null);
+    const panelElement = closestOf('.er-page');
+    setCard({
+      word: word.text,
+      sentence,
+      x: event.clientX,
+      y: event.clientY,
+      anchorEl: anchorElement,
+      sentenceEl: closestOf('.er-sentence'),
+      activeEl: panelElement?.querySelector?.('.er-sentence.is-active-sentence') ?? null,
+      panelEl: panelElement,
+    });
   }, [paragraph.entries, modes.limitLookups, lookupsUsed, t, pronounce]);
 
   // Saving is idempotent: an existing entry only gains the phonetic and the
@@ -2041,11 +2261,17 @@ export function ReaderView({
   const startRecognizing = useCallback(() => {
     if (unit === undefined) return;
     const target = scope === 'paragraph' ? paragraph.text : unit.text;
+    const attempt = ++speechAttemptRef.current;
     transcriptRef.current = '';
     setTranscript('');
     setInterim('');
     setSpokenResult(null);
+    setSpeechFeedback(null);
+    setAsrDone(false);
+    setAsrPending(false);
     setSpeaking(true);
+    setSpeechCapture('recognizer');
+    setCaptureStartedAt(Date.now());
     const recognizer = createRecognizer({
       // 识别要听得懂这本书的语种：英文识别器听不懂中文。
       lang: speechLang(language),
@@ -2056,12 +2282,24 @@ export function ReaderView({
         setInterim('');
       },
       onEnd: () => {
+        if (attempt !== speechAttemptRef.current) return;
         setSpeaking(false);
+        setSpeechCapture('');
+        setCaptureStartedAt(0);
         const spoken = transcriptRef.current;
-        if (spoken.length > 0) setSpokenResult(diffWords(target, spoken));
+        if (spoken.length > 0) {
+          const result = diffWords(target, spoken);
+          setSpokenResult(result);
+          setSpeechFeedback(buildSpeechFeedback({ spokenResult: result, transcript: spoken }));
+          setAsrDone(true);
+        }
       },
       onError: (error) => {
+        if (attempt !== speechAttemptRef.current) return;
         setSpeaking(false);
+        setSpeechCapture('');
+        setCaptureStartedAt(0);
+        setAsrDone(false);
         setAsrFailed(true);
         // The message says what to do next instead of only what went wrong.
         setTtsNote(engineMessage(error, t('reader.recognizeFallback')));
@@ -2074,6 +2312,8 @@ export function ReaderView({
   const stopRecognizing = useCallback(() => {
     recognizerRef.current?.stop?.();
     setSpeaking(false);
+    setSpeechCapture('');
+    setCaptureStartedAt(0);
   }, []);
 
   // The reading is recorded and transcribed by the Host, so it works in the
@@ -2084,32 +2324,72 @@ export function ReaderView({
     setTranscript('');
     setInterim('');
     setSpokenResult(null);
+    setSpeechFeedback(null);
+    setAsrDone(false);
+    setAsrPending(false);
+    updateAudioUrl('');
     const target = scope === 'paragraph' ? paragraph.text : unit.text;
+    const attempt = ++speechAttemptRef.current;
     const recorder = createRecorder({
       onStop: async (blob, url) => {
-        setAudioUrl(url);
+        if (attempt !== speechAttemptRef.current) return;
+        setSpeaking(false);
+        setSpeechCapture('');
+        setCaptureStartedAt(0);
+        setAsrPending(true);
+        updateAudioUrl(url);
         try {
-          const audio = await blobToBase64(blob);
+          const [audio, analysis] = await Promise.all([
+            blobToBase64(blob),
+            analyzeRecording(blob),
+          ]);
           const result = await askAi('asr', { audio, mimeType: blob.type || 'audio/webm' });
+          if (attempt !== speechAttemptRef.current) return;
           const text = typeof result?.text === 'string' ? result.text.trim() : '';
           setTranscript(text);
-          if (text.length > 0) setSpokenResult(diffWords(target, text));
-          else setTtsNote(t('reader.nothingRecognized'));
+          if (text.length > 0) {
+            const aligned = diffWords(target, text);
+            setSpokenResult(aligned);
+            setSpeechFeedback(buildSpeechFeedback({ analysis, spokenResult: aligned, transcript: text }));
+            setAsrDone(true);
+          } else {
+            setTtsNote(t('reader.nothingRecognized'));
+            setAsrDone(false);
+          }
         } catch (error) {
+          if (attempt !== speechAttemptRef.current) return;
+          setAsrDone(false);
           setTtsNote(error instanceof Error ? error.message : t('reader.recognizeFailed'));
+        } finally {
+          if (attempt === speechAttemptRef.current) setAsrPending(false);
         }
       },
-      onError: (error) => { setTtsNote(engineMessage(error, `${t('reader.recordFailed')} ${t('reader.micHint')}`)); },
+      onError: (error) => {
+        setSpeaking(false);
+        setSpeechCapture('');
+        setCaptureStartedAt(0);
+        setAsrPending(false);
+        setTtsNote(engineMessage(error, `${t('reader.recordFailed')} ${t('reader.micHint')}`));
+      },
     });
     recorderRef.current = recorder;
+    setSpeaking(true);
+    setSpeechCapture('recorder');
+    setCaptureStartedAt(Date.now());
     try {
       await recorder.start();
     } catch (error) {
+      setSpeaking(false);
+      setSpeechCapture('');
+      setCaptureStartedAt(0);
       setTtsNote(engineMessage(error, `${t('reader.recordFailed')} ${t('reader.micHint')}`));
     }
-  }, [paragraph.text, scope, t, unit?.text]);
+  }, [paragraph.text, scope, t, unit?.text, updateAudioUrl]);
 
   const stopRecording = useCallback(() => {
+    setSpeaking(false);
+    setSpeechCapture('');
+    setCaptureStartedAt(0);
     recorderRef.current?.stop?.();
   }, []);
 
@@ -2123,6 +2403,15 @@ export function ReaderView({
     const next = Math.max(0, Math.min(units.length - 1, index + delta));
     goTo(next);
   }, [scope, paragraphs, currentParagraphIndex, index, units.length, goTo]);
+
+  // Typing runs through the book: once the sentence is written the reader
+  // moves on by itself. A short pause lets the learner see the finished word
+  // before the page turns; the normal path needs no button.
+  useEffect(() => {
+    if (mode !== 'type' || practiceComplete === false) return undefined;
+    const timer = setTimeout(() => { move(1); }, 700);
+    return () => { clearTimeout(timer); };
+  }, [mode, practiceComplete, practiceKey, move]);
 
   // The arrow keys turn the page while reading. They are ignored while the
   // learner is typing, so the caret in the input keeps working.
@@ -2342,7 +2631,7 @@ export function ReaderView({
               value: String(settings.lineHeight),
               onChange: (event) => { updateSettings({ lineHeight: Number(event.target.value) }); },
             }),
-            h('span', { className: 'er-setting-value' }, `${settings.lineHeight.toFixed(2)}em`),
+            h('span', { className: 'er-setting-value' }, `${(1.2 + settings.lineHeight).toFixed(2)}×`),
           ),
           h(
             'div',
@@ -2431,39 +2720,6 @@ export function ReaderView({
           ),
   );
 
-  const typingView = h(
-    'div',
-    { className: 'er-typing-view' },
-    h(
-      'div',
-      { className: 'er-type-bar' },
-      h('span', { className: 'er-type-metric' }, `${accuracy}%`),
-      h('span', { className: 'er-type-metric' }, `${speed} ${settings.speedUnit === 'chars' ? t('reader.perMinuteChars') : t('reader.perMinuteWords')}`),
-      h(
-        'button',
-        {
-          type: 'button',
-          className: 'er-type-icon',
-          'aria-pressed': muted,
-          title: muted ? t('reader.unmute') : t('reader.mute'),
-          onClick: () => { setMuted((value) => { if (value) return false; tts.cancel(); return true; }); },
-        },
-        h(SoundIcon, { size: 14 }),
-      ),
-      h(
-        'button',
-        {
-          type: 'button',
-          className: 'er-type-icon',
-          'aria-pressed': settingsOpen,
-          title: t('reader.typingSettings'),
-          onClick: () => { setSettingsOpen((value) => !value); },
-        },
-        h(SettingsIcon, { size: 15 }),
-      ),
-    ),
-  );
-
   const isClozeScope = scope === 'cloze';
   const unitWordCount = practice.words.length;
   const toLearnCount = practice.words.filter((word) => vocabEntries[normalizeWordId(word.text)] !== undefined).length;
@@ -2479,6 +2735,9 @@ export function ReaderView({
     'div',
     { className: 'er-read-bar' },
     h(
+      'div',
+      { className: 'er-read-bar-inner' },
+      h(
       'div',
       { className: 'er-read-head' },
       h(
@@ -2538,6 +2797,19 @@ export function ReaderView({
         'button',
         {
           type: 'button',
+          ref: modesToggleRef,
+          className: 'er-round-icon er-modes-toggle',
+          title: t('reader.toolModes'),
+          'aria-label': t('reader.toolModes'),
+          'aria-pressed': modesOpen,
+          onClick: () => { setModesOpen((value) => !value); },
+        },
+        h(LearningIcon, { size: 16 }),
+      ),
+      h(
+        'button',
+        {
+          type: 'button',
           className: 'er-round-icon er-notes-button',
           title: t('notes.title'),
           'aria-label': t('notes.title'),
@@ -2574,6 +2846,7 @@ export function ReaderView({
           type: 'button',
           className: 'er-wordlist-button',
           title: t('reader.openWordList'),
+          'aria-label': t('reader.openWordList'),
           onClick: () => { onOpenWordList?.(); },
         },
         h(ListIcon, { size: 15 }),
@@ -2581,6 +2854,19 @@ export function ReaderView({
         Object.keys(vocabEntries).length > 0
           ? h('span', { className: 'er-wordlist-count' }, String(Object.keys(vocabEntries).length))
           : null,
+      ),
+      phone ? null : h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-typography-button',
+          ref: typographyAnchorRef,
+          title: t('reader.settings'),
+          'aria-label': t('reader.settings'),
+          'aria-expanded': typographyOpen,
+          onClick: () => { setTypographyOpen((value) => !value); },
+        },
+        h(SettingsIcon, { size: 16 }),
       ),
     ),
     h(
@@ -2591,24 +2877,143 @@ export function ReaderView({
       h('span', { className: 'er-read-stat' }, `est. ${estMinutes} min`),
       h('span', { className: 'er-read-stat is-known' }, `Known ${knownPercent}%`),
     ),
+    ),
   );
 
+  // The panel width feeds the automatic measure: a wide window gets a wider
+  // column than the 68-character default, but only while the learner keeps
+  // that default.
+  const [panelWidth, setPanelWidth] = useState(0);
+
+  // The reading frame: the paper column plus the tools rail, centred. The
+  // column is expressed in `ch` of the reading font, which only resolves
+  // correctly on the paper itself, so the frame is measured from the paper
+  // rather than computed on the toolbar (where `ch` would be the toolbar's
+  // own font).
+  //
+  // The measurement has to be of the width the paper *wants*, not of the
+  // width it is currently allowed: the frame constrains the paper, so
+  // measuring the constrained box would feed its own result back in and a
+  // window that once got narrow would never grow back. The constraint is
+  // lifted for the measurement and put back in the same task, before the
+  // browser paints, so nothing flickers.
+  useEffect(() => {
+    const root = readerRef.current;
+    const paper = readingRef.current;
+    if (root === null || paper === null) return undefined;
+    const rail = 78;
+    const gap = 16;
+    const padding = 16 * 2;
+    let frame = 0;
+    let last = '';
+    const apply = () => {
+      frame = 0;
+      if (paper.isConnected !== true) return;
+      const measured = Math.round((root.parentElement ?? root).getBoundingClientRect().width);
+      setPanelWidth((previous) => (Math.abs(previous - measured) > 1 ? measured : previous));
+      root.style.setProperty('--er-frame', 'none');
+      const natural = paper.getBoundingClientRect().width;
+      if (natural <= 0) return;
+      const next = `${Math.round(natural + rail + gap + padding)}px`;
+      last = next;
+      root.style.setProperty('--er-frame', next);
+      // The bar needs two rows once the frame can no longer hold the book, its
+      // place, the actions and the figures on one line. The breakpoint is the
+      // frame width, not the window width, so a wide window with a narrow
+      // column still gets the calm layout.
+      root.dataset.barRows = natural + rail + gap + padding < 1300 ? '2' : '1';
+    };
+    const schedule = () => {
+      if (frame !== 0) return;
+      frame = window.requestAnimationFrame(apply);
+    };
+    schedule();
+    // The window and the panel are observed as well as the paper: while the
+    // frame is (wrongly) small the paper cannot grow, so a resize of the
+    // window or of the shell's panel is the only event that can break the
+    // deadlock — and it is exactly the event that has to be measured.
+    const panel = root.closest?.('.er-page') ?? root.parentElement ?? paper.parentElement;
+    window.addEventListener('resize', schedule);
+    if (typeof ResizeObserver === 'undefined') {
+      return () => { window.removeEventListener('resize', schedule); };
+    }
+    const observer = new ResizeObserver(schedule);
+    observer.observe(paper);
+    if (panel !== null && panel !== undefined) observer.observe(panel);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', schedule);
+      if (frame !== 0) window.cancelAnimationFrame(frame);
+    };
+  }, [settings.fontSize, settings.fontStyle, settings.columnWidth, index]);
+
   // Where the learning-modes panel opens: next to the tool that opened it and
-  // below the sticky mode row, so nothing can hide it.
+  // below the sticky mode row, so nothing can hide it. On a phone it is a
+  // bottom sheet instead: a 300 pixel panel anchored to a rail button would
+  // fall off a 390 pixel screen.
   const modesPanelStyle = useMemo(() => {
+    if (phone) return undefined;
     if (modesAnchor === null) return { left: 12, top: 12, width: 300 };
     const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
     const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
     const width = 300;
-    const rowBottom = modesRowRef.current?.getBoundingClientRect?.().bottom ?? 0;
     const left = Math.max(12, Math.min(modesAnchor.left - width - 12, viewportWidth - width - 12));
-    const top = Math.max(12, Math.min(Math.max(modesAnchor.bottom, rowBottom) + 8, viewportHeight - 160));
+    // Anchor to the tool itself, not to the mode row: in immersive reading the
+    // mode row is a floating layer near the player, and using its bottom would
+    // push this panel off the window. Reserve the panel's real maximum height.
+    const panelHeight = Math.min(viewportHeight * 0.62, 440);
+    const top = Math.max(12, Math.min(modesAnchor.top - 12, viewportHeight - panelHeight - 16));
     return { left, top, width };
-  }, [modesAnchor]);
+  }, [modesAnchor, phone]);
 
   const renderModesPanel = () => h(
     'div',
-    { className: 'er-modes-panel', style: modesPanelStyle, ref: modesPanelRef },
+    { className: `er-modes-panel${phone ? ' is-sheet' : ''}`, style: modesPanelStyle, ref: modesPanelRef },
+    // As a bottom sheet the panel needs a name and a visible way out: on a
+    // phone there is no hover-out and no Escape key.
+    phone
+      ? h(
+        'div',
+        { className: 'er-sheet-head' },
+        h('span', { className: 'er-sheet-title' }, t('reader.toolModes')),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'er-round-icon er-sheet-close',
+            title: t('reader.close'),
+            'aria-label': t('reader.close'),
+            onClick: () => { setModePanelOpen(false); },
+          },
+          h(CloseIcon, { size: 16 }),
+        ),
+      )
+      : null,
+    h(
+      'div',
+      { className: 'er-mode-actions', role: 'group', 'aria-label': t('reader.toolModes') },
+      [
+        ['listen', t('reader.modeListen'), SoundIcon],
+        ['type', t('reader.modeType'), KeyboardIcon],
+        ['speak', t('reader.modeSpeak'), MicIcon],
+      ].map(([value, label, Icon]) => h(
+        'button',
+        {
+          key: value,
+          type: 'button',
+          className: 'er-mode',
+          'aria-pressed': mode === value,
+          onClick: () => {
+            setMode(value);
+            setModePanelOpen(false);
+            setModesOpen(false);
+            stopSpeaking();
+          },
+        },
+        h(Icon, { size: 15 }),
+        h('span', { className: 'er-mode-text' }, label),
+      )),
+    ),
     [
       ['highlight', t('reader.modeHighlight'), t('reader.modeHighlightHint')],
       ['gloss', t('reader.modeGloss'), t('reader.modeGlossHint')],
@@ -2641,7 +3046,7 @@ export function ReaderView({
 
   const renderToc = () => h(
     Modal,
-    { title: t('reader.tocTitle'), onClose: () => { setTocOpen(false); } },
+    { title: t('reader.tocTitle'), closeLabel: t('reader.close'), onClose: () => { setTocOpen(false); } },
     h(
       'div',
       { className: 'er-toc' },
@@ -2672,6 +3077,7 @@ export function ReaderView({
         className: 'er-read-tool',
         ref: options.ref,
         title: options.title ?? label,
+        'aria-label': options.title ?? label,
         'aria-pressed': options.pressed,
         disabled: options.disabled,
         onClick: options.onClick,
@@ -2679,10 +3085,11 @@ export function ReaderView({
       h('span', { className: 'er-read-tool-icon' }, icon),
       h('span', { className: 'er-read-tool-label' }, label),
     );
-    return h(
+    const rail = h(
       'div',
       { className: 'er-read-tools' },
-      tool('modes', h(HighlighterIcon, { size: 17 }), t('reader.toolModes'), {
+      tool('modes', h(LearningIcon, { size: 17 }), phone ? t('reader.toolModesShort') : t('reader.toolModes'), {
+        title: t('reader.toolModes'),
         ref: modesButtonRef,
         pressed: modePanelOpen,
         onClick: () => {
@@ -2705,6 +3112,21 @@ export function ReaderView({
       tool('toc', h(ListIcon, { size: 17 }), t('reader.tocTitle'), {
         onClick: () => { setTocOpen(true); setModePanelOpen(false); },
       }),
+    );
+    if (phone) return rail;
+    return h(
+      'div',
+      {
+        className: `er-tools-magnet${toolsOpen ? ' is-open' : ''}`,
+        onPointerEnter: () => { setToolsOpen(true); },
+        onPointerLeave: () => { setToolsOpen(false); },
+        onFocus: () => { setToolsOpen(true); },
+        onBlur: (event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setToolsOpen(false);
+        },
+      },
+      h('div', { className: 'er-tools-tab', 'aria-hidden': 'true' }, '‹'),
+      rail,
     );
   };
 
@@ -2796,7 +3218,7 @@ export function ReaderView({
     );
     return h(
       'div',
-      { className: 'er-paragraph-actions' },
+      { className: 'er-paragraph-actions', role: 'group', 'aria-label': t('reader.paragraphTools') },
       action(
         t('notes.addForParagraph'),
         h(PencilIcon, { size: 13 }),
@@ -2816,6 +3238,16 @@ export function ReaderView({
         () => { speakParagraph(group, paragraphIndex); },
         speaking ? ' is-speaking' : '',
       ),
+      // After a read-aloud the review lives here, on the right of the text:
+      // the passage shows what was said, the panel explains how it sounded.
+      mode === 'speak' && paragraphIndex === currentParagraphIndex && (speechFeedback !== null || spokenResult !== null)
+        ? action(
+          t('reader.analysisOpen'),
+          h(WaveIcon, { size: 14 }),
+          () => { setAnalysisOpen(true); },
+          ' is-analysis',
+        )
+        : null,
     );
   };
 
@@ -2867,6 +3299,7 @@ export function ReaderView({
   // the text; when that is too narrow, it opens to the left and stays glued to
   // the button it belongs to.
   const noteEditorStyle = useMemo(() => {
+    if (phone) return undefined;
     if (noteEditor?.rect == null) return { left: 12, top: 12, width: 320 };
     const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
     const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
@@ -2877,14 +3310,14 @@ export function ReaderView({
       : Math.max(12, rect.right - width);
     const top = Math.max(12, Math.min(rect.top - 8, viewportHeight - 180));
     return { left, top, width };
-  }, [noteEditor]);
+  }, [noteEditor, phone]);
 
   const renderNoteEditor = () => {
     if (noteEditor === null) return null;
     const notes = bookNotes.filter((note) => noteEditor.unitIndexes.includes(note.unitIndex));
     return h(
       'div',
-      { className: 'er-note-editor', style: noteEditorStyle, ref: noteEditorRef },
+      { className: `er-note-editor${phone ? ' is-sheet' : ''}`, style: noteEditorStyle, ref: noteEditorRef },
       h(
         'div',
         { className: 'er-note-editor-head' },
@@ -3045,7 +3478,11 @@ export function ReaderView({
           {
             key: `${position}-${word.start}`,
             className,
-            title: mode === 'type' ? t('reader.clickToHear') : t('reader.clickToLookup'),
+            title: mode === 'type'
+              ? t('reader.clickToHear')
+              : (heardByDisplay?.get(position) !== undefined
+                ? format(t('reader.spokenHeard'), { word: heardByDisplay.get(position) })
+                : t('reader.clickToLookup')),
             onClick: (event) => {
               // In the typing mode the field keeps the focus, so a click only
               // pronounces the word; elsewhere it opens the word card.
@@ -3067,23 +3504,39 @@ export function ReaderView({
     ));
   };
 
+  // Picking something closes the panel. The row is also kept open by
+  // :focus-within, so focus goes back to the toggle instead of staying on a
+  // chip that is no longer on screen.
+  const closeModes = () => {
+    setModesOpen(false);
+    modesToggleRef.current?.focus?.({ preventScroll: true });
+  };
+
   const renderModeRow = () => h(
     'div',
     { className: 'er-modes', ref: modesRowRef },
+    // Three zones, one per decision: what to practise, what unit to practise
+    // it in, and which reading aids are on. A hairline separates them, and one
+    // selected style is used everywhere, so the row reads as a control panel
+    // instead of a line of chips.
     h(
-      'button',
-      { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'listen', onClick: () => { setMode('listen'); stopSpeaking(); } },
-      h(SoundIcon, { size: 15 }), t('reader.modeListen'),
-    ),
-    h(
-      'button',
-      { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'type', onClick: () => { setMode('type'); stopSpeaking(); } },
-      h(KeyboardIcon, { size: 15 }), t('reader.modeType'),
-    ),
-    h(
-      'button',
-      { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'speak', onClick: () => { setMode('speak'); stopSpeaking(); } },
-      h(MicIcon, { size: 15 }), t('reader.modeSpeak'),
+      'div',
+      { className: 'er-mode-chips', role: 'group', 'aria-label': t('reader.toolModes') },
+      h(
+        'button',
+        { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'listen', onClick: () => { setMode('listen'); closeModes(); stopSpeaking(); } },
+        h(SoundIcon, { size: 15 }), h('span', { className: 'er-mode-text' }, t('reader.modeListen')),
+      ),
+      h(
+        'button',
+        { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'type', onClick: () => { setMode('type'); closeModes(); stopSpeaking(); } },
+        h(KeyboardIcon, { size: 15 }), h('span', { className: 'er-mode-text' }, t('reader.modeType')),
+      ),
+      h(
+        'button',
+        { type: 'button', className: 'er-mode', 'aria-pressed': mode === 'speak', onClick: () => { setMode('speak'); closeModes(); stopSpeaking(); } },
+        h(MicIcon, { size: 15 }), h('span', { className: 'er-mode-text' }, t('reader.modeSpeak')),
+      ),
     ),
     h('span', { className: 'er-scope-label' }, t('reader.scopeLabel')),
     h(
@@ -3091,12 +3544,12 @@ export function ReaderView({
       { className: 'er-scope', role: 'group', 'aria-label': t('reader.scopeLabel') },
       h(
         'button',
-        { type: 'button', className: 'er-scope-item', 'aria-pressed': scope === 'sentence', onClick: () => { setScope('sentence'); stopSpeaking(); } },
+        { type: 'button', className: 'er-scope-item', 'aria-pressed': scope === 'sentence', onClick: () => { setScope('sentence'); closeModes(); stopSpeaking(); } },
         t('reader.scopeSentence'),
       ),
       h(
         'button',
-        { type: 'button', className: 'er-scope-item', 'aria-pressed': scope === 'paragraph', onClick: () => { setScope('paragraph'); stopSpeaking(); } },
+        { type: 'button', className: 'er-scope-item', 'aria-pressed': scope === 'paragraph', onClick: () => { setScope('paragraph'); closeModes(); stopSpeaking(); } },
         t('reader.scopeParagraph'),
       ),
       h(
@@ -3106,21 +3559,26 @@ export function ReaderView({
           className: 'er-scope-item',
           'aria-pressed': isClozeScope,
           disabled: clozeWords.length === 0,
-          onClick: () => { setScope('cloze'); stopSpeaking(); },
+          onClick: () => { setScope('cloze'); closeModes(); stopSpeaking(); },
         },
         t('reader.scopeCloze'),
       ),
+    ),
+    h(
+      'div',
+      { className: 'er-modes-aids', role: 'group', 'aria-label': t('reader.toolAids') },
       h(
         'button',
         {
           type: 'button',
           className: 'er-mode er-translate-toggle',
           'aria-pressed': modes.translate,
+          'aria-label': t('reader.modeTranslate'),
           title: t('reader.modeTranslateHint'),
-          onClick: () => { toggleMode('translate'); },
+          onClick: () => { toggleMode('translate'); closeModes(); },
         },
         h(TranslateIcon, { size: 15 }),
-        t('reader.modeTranslate'),
+        h('span', { className: 'er-mode-text' }, t('reader.modeTranslate')),
       ),
     ),
   );
@@ -3132,7 +3590,7 @@ export function ReaderView({
   // button; the panel inside it carries the surface and does the scrolling.
   const renderPlayPanel = () => h(
     'div',
-    { className: 'er-play-pop', style: playPanelStyle, ref: playPanelRef },
+    { className: `er-play-pop${phone ? ' is-sheet' : ''}`, style: playPanelStyle, ref: playPanelRef },
     h(
       'div',
       { className: 'er-play-panel' },
@@ -3258,6 +3716,68 @@ export function ReaderView({
     ),
   );
 
+  // Turning the page is the one control every practice mode needs: the learner
+  // finishes a sentence and steps to the next one from the bar they are
+  // already using. Moving stops whatever the mode was doing first, so neither
+  // the microphone nor the dictation voice follows the learner to the next
+  // sentence.
+  const renderPracticeNav = () => h(
+    'div',
+    { className: 'er-practice-nav' },
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-practice-nav-btn',
+        'data-nav': 'prev',
+        title: isParagraphScope ? t('reader.previousParagraph') : t('reader.previous'),
+        'aria-label': isParagraphScope ? t('reader.previousParagraph') : t('reader.previous'),
+        onClick: () => { stopSpeaking(); move(-1); },
+      },
+      h(PrevIcon, { size: 14 }),
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-practice-nav-btn',
+        'data-nav': 'next',
+        title: isParagraphScope ? t('reader.nextParagraph') : t('reader.next'),
+        'aria-label': isParagraphScope ? t('reader.nextParagraph') : t('reader.next'),
+        onClick: () => { stopSpeaking(); move(1); },
+      },
+      h(NextIcon, { size: 14 }),
+    ),
+  );
+
+  // The state of the read-aloud. It is shown by the bar that owns the
+  // playback: floating above the player while reading, and as a row inside the
+  // practice bar while typing or speaking — a layer over the word input is a
+  // layer the learner cannot click through, and a phone has no player bar to
+  // fall back on.
+  const renderPlayStatus = () => (playing ? h(
+    'div',
+    { className: 'er-play-status', role: 'status', 'aria-live': 'polite' },
+    h('span', { className: `er-play-status-dot${playbackPaused ? ' is-paused' : ''}`, 'aria-hidden': 'true' }),
+    h('span', { className: 'er-play-status-text' }, playbackPaused ? t('reader.pausedNow') : t('reader.playingNow')),
+    h(
+      'span',
+      { className: 'er-play-status-count' },
+      `${currentParagraphIndex + 1} / ${paragraphs.length}`,
+    ),
+    h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-play-status-pause',
+        title: playbackPaused ? t('reader.resumeNow') : t('reader.pauseNow'),
+        'aria-label': playbackPaused ? t('reader.resumeNow') : t('reader.pauseNow'),
+        onClick: () => { if (playbackPaused) resumePlayback(); else pausePlayback(); },
+      },
+      playbackPaused ? h(PlayIcon, { size: 13 }) : h(PauseIcon, { size: 13 }),
+    ),
+  ) : null);
+
   const renderFoot = () => h(
     'div',
     { className: 'er-read-foot' },
@@ -3266,15 +3786,25 @@ export function ReaderView({
       { className: 'er-controls' },
       h(
         'button',
-        { type: 'button', className: 'er-btn er-btn-primary', onClick: playing ? stopSpeaking : playActive },
-        playing ? h(PauseIcon, { size: 14 }) : h(PlayIcon, { size: 14 }),
-        playing ? t('reader.stop') : t('reader.play'),
+        {
+          type: 'button',
+          className: 'er-btn er-btn-primary',
+          onClick: playing ? (playbackPaused ? resumePlayback : pausePlayback) : playActive,
+          title: playing
+            ? (playbackPaused ? t('reader.resumeNow') : t('reader.pauseNow'))
+            : t('reader.play'),
+        },
+        playing && playbackPaused === false ? h(PauseIcon, { size: 14 }) : h(PlayIcon, { size: 14 }),
+        playing
+          ? (playbackPaused ? t('reader.resumeNow') : t('reader.pauseNow'))
+          : t('reader.play'),
       ),
       h(
         'button',
         {
           type: 'button',
           className: 'er-btn er-btn-icon',
+          'data-nav': 'prev',
           title: isParagraphScope ? t('reader.previousParagraph') : t('reader.previous'),
           onClick: () => { move(-1); },
         },
@@ -3285,6 +3815,7 @@ export function ReaderView({
         {
           type: 'button',
           className: 'er-btn er-btn-icon',
+          'data-nav': 'next',
           title: isParagraphScope ? t('reader.nextParagraph') : t('reader.next'),
           onClick: () => { move(1); },
         },
@@ -3316,7 +3847,12 @@ export function ReaderView({
       h('span', { className: 'er-label' }, t('reader.speed')),
       h(
         'select',
-        { className: 'er-select', value: String(rate), onChange: (event) => { const next = Number(event.target.value); setRate(next); tts.setRate(next); } },
+        {
+          className: 'er-select',
+          value: String(rate),
+          'aria-label': t('reader.speed'),
+          onChange: (event) => { const next = Number(event.target.value); setRate(next); tts.setRate(next); },
+        },
         RATES.map((value) => h('option', { key: value, value: String(value) }, `${value}x`)),
       ),
       h('span', { className: 'er-label' }, t('reader.voice')),
@@ -3325,6 +3861,7 @@ export function ReaderView({
         {
           className: 'er-select',
           value: voiceId,
+          'aria-label': t('reader.voice'),
           onChange: (event) => { setVoiceId(event.target.value); tts.setVoice(event.target.value); },
         },
         voices.length === 0
@@ -3339,16 +3876,51 @@ export function ReaderView({
     ),
   );
 
+  // What the read-aloud bar says: one line, always true of the current state.
+  // It used to say "nothing recognized" while the learner was still recording,
+  // which read as a failure rather than as progress.
+  const speakStatusText = asrPending
+    ? t('reader.recognizingNow')
+    : speaking
+      ? (speechCapture === 'recorder' ? t('reader.speakStillRecording') : t('reader.listeningNow'))
+      : asrDone
+        ? (spokenResult === null
+          ? t('reader.statusEmpty')
+          : format(t('reader.statusRecognized'), { n: Math.round((spokenResult.accuracy ?? 0) * 100) }))
+        : (!asrAvailable && (!recognitionSupported || asrFailed))
+          ? (asrFailed ? t('reader.recognizeFallback') : t('reader.noRecognition'))
+          : t('reader.speakHint');
+
+  // On a phone the reading surface keeps its own comfortable measure: the
+  // paragraph is capped at 18 pixels and the leading is opened up. A larger
+  // size the learner picked on the desktop still applies there.
+  const captureClock = `${String(Math.floor(captureElapsed / 60)).padStart(2, '0')}:${String(captureElapsed % 60).padStart(2, '0')}`;
+  const readingFontSize = phone ? Math.min(settings.fontSize, 18) : settings.fontSize;
+  const readingLineHeight = phone ? Math.max(1.85, 1.2 + settings.lineHeight) : 1.2 + settings.lineHeight;
+  // The reading frame is one column wide: the paper decides it, and the read
+  // bar and the tools rail line up with the paper instead of the panel edge.
+  const columnMeasure = effectiveColumnWidth(settings.columnWidth, panelWidth);
+  const readerStyle = {
+    '--er-column-width': columnMeasure,
+  };
+  // The measure is turned into pixels by the measuring effect (it needs the
+  // reading font's own `ch`), and handed to the layout as `--er-measure`.
+
   return h(
     'div',
-    { className: 'er-reader' },
+    {
+      className: `er-reader${phone ? '' : ' is-immersive'}${modesOpen ? ' is-modes-open' : ''} is-mode-${mode}`,
+      style: readerStyle,
+      ref: readerRef,
+      'data-column': columnMeasure,
+    },
     renderReadBar(),
     h(
       'div',
       { className: 'er-read-main' },
       h(
         'div',
-        { className: 'er-read-body', ref: readBodyRef },
+        { className: 'er-read-body' },
         renderModeRow(),
         h(
           'div',
@@ -3357,24 +3929,34 @@ export function ReaderView({
             className: 'er-reading-page er-paragraph',
             style: {
               fontFamily: FONT_FAMILIES[settings.fontStyle] ?? FONT_FAMILIES.serif,
-              fontSize: `${settings.fontSize}px`,
-              lineHeight: String(1.2 + settings.lineHeight),
-              '--er-text-size': `${settings.fontSize}px`,
-              '--er-column-width': COLUMN_WIDTHS[settings.columnWidth] ?? COLUMN_WIDTHS.normal,
+              fontSize: `${readingFontSize}px`,
+
+              lineHeight: String(readingLineHeight),
+              '--er-reading-line-height': String(readingLineHeight),
+              '--er-text-size': `${readingFontSize}px`,
               '--er-progress': `${readingProgress}%`,
             },
           },
-          // The hint belongs to the page: it sits at the top of the card, so
-          // it is seen once and never floats below the text.
-          mode === 'listen'
-            ? h(
-              'div',
-              { className: 'er-page-note is-first' },
-              t('reader.tapWordHint'),
-              h('span', { className: 'er-page-note-keys' }, t('reader.keyHint')),
-            )
-            : null,
-          pageRange.groups.map((group, position) => {
+          // The paper is a fixed frame: the sheet never moves, only the text
+          // inside this window scrolls.
+          h(
+            'div',
+            {
+              className: `er-reading-scroll${clipFade === 0 ? '' : ' is-clipped'}`,
+              ref: readingScrollRef,
+              style: { '--er-clip-fade': `${clipFade}px` },
+            },
+            // The hint belongs to the page: it sits at the top of the card, so
+            // it is seen once and never floats below the text.
+            mode === 'listen'
+              ? h(
+                'div',
+                { className: 'er-page-note is-first' },
+                t('reader.tapWordHint'),
+                h('span', { className: 'er-page-note-keys' }, t('reader.keyHint')),
+              )
+              : null,
+            pageRange.groups.map((group, position) => {
             const groupIndex = pageRange.start + position;
             if (groupIndex !== currentParagraphIndex) return renderPlainParagraph(group, groupIndex);
             return h(
@@ -3390,22 +3972,57 @@ export function ReaderView({
                   renderParagraphTranslation(groupIndex),
                 ),
               ),
-              renderParagraphActions(group, groupIndex),
-            );
-          }),
+                renderParagraphActions(group, groupIndex),
+              );
+            }),
+          ),
         ),
-        mode === 'type' ? typingView : null,
+        null,
+      ),
+      renderTools(),
+    ),
+    // While the text is being read aloud the player says so where the eye
+    // already is, and offers the one control that matters there: pause. In the
+    // practice modes the same row lives inside their own bar instead (below).
+    mode === 'listen' && !phone ? renderPlayStatus() : null,
+    // The mode panels are docked below the reading frame instead of living at the
+    // end of the paper card: a control you have to scroll the whole page to reach
+    // is not a control. They sit above the player bar and never scroll away.
+    h(
+      'div',
+      { className: mode === 'type' ? 'er-mode-dock is-typing' : mode === 'speak' ? 'er-mode-dock is-read-aloud' : 'er-mode-dock' },
+        mode === 'listen' ? null : renderPlayStatus(),
         ttsNote ? h('div', { className: 'er-error' }, ttsNote) : null,
         mode === 'type'
           ? h(
             'div',
-            { className: 'er-panel er-type-panel' },
+            { className: 'er-panel er-type-panel er-type-bar' },
+            h(
+              'div',
+              { className: 'er-type-bar-status' },
+              typingStats.typedChars === 0
+                ? h('span', { className: 'er-type-hint' }, t('reader.typingHint'))
+                : h(
+                  'span',
+                  { className: 'er-type-metrics' },
+                  h('span', { className: 'er-type-metric' }, `${accuracy}%`),
+                  // A speed that is still zero means "not measurable yet", so it
+                  // is not printed: only the accuracy says something so far.
+                  speed === 0
+                    ? null
+                    : h('span', { className: 'er-type-metric' }, `${speed} ${settings.speedUnit === 'chars' ? t('reader.perMinuteChars') : t('reader.perMinuteWords')}`),
+                ),
+              h('span', { className: 'er-type-panel-meta' }, `${wordIndex + 1} / ${practice.words.length}`),
+            ),
             h(
               'div',
               { className: `er-input-row${settings.hideInput ? ' is-hidden' : ''}` },
               h('input', {
                 ref: wordInputRef,
                 className: 'er-word-input',
+                // Word by word: the box is only as wide as the word on the
+                // desk, so the eye never has to cross a line of empty field.
+                style: { width: `${Math.min(24, Math.max(4, (practice.words[wordIndex]?.text ?? '').length + 2))}ch` },
                 value: wordInput,
                 onChange: onWordChange,
                 onKeyDown: onWordKeyDown,
@@ -3416,31 +4033,75 @@ export function ReaderView({
                 autoComplete: 'off',
               }),
             ),
+            // Every control of the dictation rides in one row: a field, the
+            // verdict and five buttons are a bar, not a stack of panels.
             h(
               'div',
-              { className: 'er-controls' },
+              { className: 'er-type-actions' },
+              h(
+                'button',
+                { type: 'button', className: 'er-btn er-btn-icon er-type-action', title: t('reader.retry'), 'aria-label': t('reader.retry'), onClick: resetTyping },
+                h(RepeatIcon, { size: 14 }),
+              ),
+              h(
+                'button',
+                { type: 'button', className: 'er-btn er-btn-icon er-type-action', title: t('reader.listenOnce'), 'aria-label': t('reader.listenOnce'), onClick: playActive },
+                h(SoundIcon, { size: 14 }),
+              ),
+              // Muting belongs to the dictation, not to the app: it stays here
+              // as one icon, and the duplicate gear does not exist.
               h(
                 'button',
                 {
                   type: 'button',
-                  className: 'er-btn er-btn-primary',
-                  disabled: !practiceComplete,
-                  onClick: () => { move(1); },
+                  className: 'er-btn er-btn-icon er-type-action',
+                  'aria-pressed': muted,
+                  title: muted ? t('reader.unmute') : t('reader.mute'),
+                  'aria-label': muted ? t('reader.unmute') : t('reader.mute'),
+                  onClick: () => { setMuted((value) => { if (value) return false; tts.cancel(); return true; }); },
                 },
-                isClozeScope ? t('reader.nextParagraph') : (isParagraphScope ? t('reader.nextParagraph') : t('reader.nextSentence')),
+                h(MutedIcon, { size: 14 }),
               ),
-              h('button', { type: 'button', className: 'er-btn', onClick: resetTyping }, t('reader.retry')),
-              h('button', { type: 'button', className: 'er-btn', onClick: playActive }, h(RepeatIcon, { size: 14 }), t('reader.listenOnce')),
+              // The player bar is the reading mode's bar, so the speed of the
+              // dictation voice travels with the typing bar instead of
+              // disappearing with the player.
+              h(
+                'select',
+                {
+                  className: 'er-select er-type-rate',
+                  value: String(rate),
+                  title: t('reader.speed'),
+                  'aria-label': t('reader.speed'),
+                  onChange: (event) => { const next = Number(event.target.value); setRate(next); tts.setRate(next); },
+                },
+                RATES.map((value) => h('option', { key: value, value: String(value) }, `${value}x`)),
+              ),
+              renderPracticeNav(),
             ),
           )
           : null,
         mode === 'speak'
           ? h(
             'div',
-            { className: 'er-panel' },
+            { className: 'er-panel er-speak-panel er-speak-bar' },
+            // One line of state: recording, recognizing, or what came out of
+            // it. The comparison itself is drawn in the passage.
             h(
               'div',
-              { className: 'er-controls' },
+              { className: 'er-speak-line', role: 'status', 'aria-live': 'polite' },
+              asrPending
+                ? h('span', { className: 'er-speak-spinner', 'aria-hidden': 'true' })
+                : asrDone
+                  ? h('span', { className: 'er-speak-done-mark', 'aria-hidden': 'true' }, '✓')
+                  : speaking
+                    ? h('span', { className: 'er-speak-recording-dots', 'aria-hidden': 'true' }, h('span'), h('span'), h('span'))
+                    : null,
+              h('span', { className: 'er-speak-status-text', title: speakStatusText }, speakStatusText),
+              speaking ? h('span', { className: 'er-speak-clock' }, captureClock) : null,
+            ),
+            h(
+              'div',
+              { className: 'er-speak-actions' },
               asrAvailable
                 ? h(
                   'button',
@@ -3465,42 +4126,36 @@ export function ReaderView({
                     h(MicIcon, { size: 14 }),
                     audioUrl ? t('reader.replayRecording') : t('reader.startRecording'),
                   ),
-              h('button', { type: 'button', className: 'er-btn', onClick: () => { setSpokenResult(null); setTranscript(''); setInterim(''); } }, t('reader.retry')),
-            ),
-            (!asrAvailable && (!recognitionSupported || asrFailed))
-              ? h('div', { className: 'er-note' }, asrFailed ? t('reader.recognizeFallback') : t('reader.noRecognition'))
-              : null,
-            audioUrl ? h('audio', { controls: true, src: audioUrl, style: { width: '100%' } }) : null,
-            h('div', { className: 'er-transcript' }, transcript || interim || t('reader.transcriptEmpty')),
-            spokenResult === null
-              ? null
-              : h(
-                'div',
-                { className: 'er-panel' },
-                h(
-                  'div',
-                  { className: 'er-stats' },
-                  h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.accuracy')), h('span', { className: 'er-stat-value' }, `${Math.round((spokenResult.accuracy ?? 0) * 100)}%`)),
-                  h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.missingWords')), h('span', { className: 'er-stat-value' }, String(spokenResult.missing ?? 0))),
-                  h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.extraWords')), h('span', { className: 'er-stat-value' }, String(spokenResult.extra ?? 0))),
-                ),
-                h(
-                  'div',
-                  { className: 'er-chips' },
-                  (spokenResult.words ?? []).map((entry, position) => h(
-                    'span',
-                    { key: `${position}-${entry.word}`, className: `er-chip${entry.status === 'ok' ? ' is-ok' : entry.status === 'wrong' ? ' is-bad' : entry.status === 'missing' ? ' is-missing' : ' is-extra'}` },
-                    entry.word,
-                  )),
-                ),
+              h(
+                'button',
+                { type: 'button', className: 'er-btn er-btn-icon', title: t('reader.retry'), 'aria-label': t('reader.retry'), onClick: resetSpokenPractice },
+                h(RepeatIcon, { size: 14 }),
               ),
+              // What was said is compared in the passage; the review of voice,
+              // intonation and pronunciation opens from the paragraph's right
+              // gutter, and from this one icon as well.
+              (speechFeedback !== null || spokenResult !== null)
+                ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'er-btn er-btn-icon er-speak-analysis',
+                    title: t('reader.analysisOpen'),
+                    'aria-label': t('reader.analysisOpen'),
+                    onClick: () => { setAnalysisOpen(true); },
+                  },
+                  h(WaveIcon, { size: 15 }),
+                )
+                : null,
+              renderPracticeNav(),
+            ),
           )
           : null,
-        null,
-      ),
-      renderTools(),
     ),
-    renderFoot(),
+    // One control surface at a time: the player belongs to the reading mode,
+    // and each practice mode brings its own bar (the dock below the paper).
+    // Stacking them made the learner read two bars that fought each other.
+    mode === 'listen' ? renderFoot() : null,
     notesOpen
       ? h(NotesPanel, {
         t,
@@ -3512,10 +4167,101 @@ export function ReaderView({
         onChanged: () => { setNotesVersion((value) => value + 1); },
       })
       : null,
+    analysisOpen
+      ? h(
+        Modal,
+        {
+          title: t('reader.analysisTitle'),
+          closeLabel: t('reader.close'),
+          onClose: () => { setAnalysisOpen(false); },
+        },
+        h(
+          'div',
+          { className: 'er-analysis' },
+          spokenResult === null ? null : h(
+            'div',
+            { className: 'er-stats' },
+            h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.accuracy')), h('span', { className: 'er-stat-value' }, `${Math.round((spokenResult.accuracy ?? 0) * 100)}%`)),
+            h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.missingWords')), h('span', { className: 'er-stat-value' }, String(spokenResult.missing ?? 0))),
+            h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.extraWords')), h('span', { className: 'er-stat-value' }, String(spokenResult.extra ?? 0))),
+          ),
+          speechFeedback === null ? null : h(
+            'section',
+            { className: 'er-speech-feedback', 'aria-label': t('reader.feedbackTitle') },
+            h(
+              'div',
+              { className: 'er-feedback-head' },
+              h('span', { className: 'er-feedback-title' }, t('reader.feedbackTitle')),
+              speechFeedback.paceWpm > 0
+                ? h('span', { className: 'er-feedback-pace' }, `${speechFeedback.paceWpm} wpm`)
+                : null,
+            ),
+            h(
+              'div',
+              { className: 'er-feedback-grid' },
+              ['voice', 'intonation', 'pronunciation'].map((id) => {
+                const item = speechFeedback[id];
+                const label = id === 'voice'
+                  ? t('reader.feedbackVoice')
+                  : id === 'intonation' ? t('reader.feedbackIntonation') : t('reader.feedbackPronunciation');
+                return h(
+                  'div',
+                  { key: id, className: `er-feedback-item is-${item.tone}` },
+                  h('span', { className: 'er-feedback-label' }, label),
+                  h(
+                    'span',
+                    { className: 'er-feedback-summary' },
+                    t(`speech.${id}.${item.summaryKey}`),
+                    id === 'pronunciation' ? ` · ${Math.round(item.accuracy * 100)}%` : '',
+                  ),
+                );
+              }),
+            ),
+            speechFeedback.suggestions.length === 0 ? null : h(
+              'ul',
+              { className: 'er-feedback-suggestions' },
+              speechFeedback.suggestions.map((key) => h('li', { key }, t(`speech.suggestion.${key}`))),
+            ),
+            h(
+              'button',
+              { type: 'button', className: 'er-btn er-btn-primary er-standard-pronunciation', onClick: playActive },
+              h(SoundIcon, { size: 14 }),
+              t('reader.standardPronunciation'),
+            ),
+          ),
+          spokenResult === null ? null : h(
+            'div',
+            { className: 'er-chips' },
+            (spokenResult.words ?? []).map((entry, position) => h(
+              'span',
+              {
+                key: `${position}-${entry.word}`,
+                className: `er-chip${entry.status === 'ok' ? ' is-ok' : entry.status === 'wrong' ? ' is-bad' : entry.status === 'missing' ? ' is-missing' : ' is-extra'}`,
+                title: entry.status === 'wrong' && typeof entry.heard === 'string'
+                  ? format(t('reader.spokenHeard'), { word: entry.heard })
+                  : undefined,
+              },
+              entry.word,
+            )),
+          ),
+          // A recorder-only environment has no transcript to show: it says so
+          // instead of claiming that nothing was recognized.
+          (asrAvailable || recognitionSupported)
+            ? h(
+              'div',
+              { className: 'er-analysis-heard' },
+              h('span', { className: 'er-label' }, t('reader.transcriptLabel')),
+              h('p', { className: 'er-analysis-text' }, transcript || t('reader.transcriptEmpty')),
+            )
+            : h('p', { className: 'er-analysis-text' }, asrFailed ? t('reader.recognizeFallback') : t('reader.noRecognition')),
+          audioUrl ? h('audio', { controls: true, src: audioUrl, style: { width: '100%' } }) : null,
+        ),
+      )
+      : null,
     settingsOpen
       ? h(
         Modal,
-        { title: t('reader.settings'), onClose: () => { setSettingsOpen(false); } },
+        { title: t('reader.settings'), closeLabel: t('reader.close'), onClose: () => { setSettingsOpen(false); } },
         settingsPanel(),
       )
       : null,
@@ -3527,6 +4273,10 @@ export function ReaderView({
         word: card.word,
         sentence: card.sentence,
         position: { x: card.x, y: card.y },
+        anchorEl: card.anchorEl ?? null,
+        sentenceEl: card.sentenceEl ?? null,
+        activeEl: card.activeEl ?? null,
+        panelEl: card.panelEl ?? null,
         entry: vocabEntries[normalizeWordId(card.word)],
         onClose: () => { setCard(null); },
         onSave: saveWord,
@@ -3535,6 +4285,80 @@ export function ReaderView({
       }),
     // The two floating panels live in the body: they are anchored to the
     // reader, but they must not be clipped by it.
+    floating(typographyOpen ? h(
+      'div',
+      {
+        className: 'er-play-pop er-typography-pop',
+        style: typographyPanelStyle,
+        ref: typographyPanelRef,
+        role: 'dialog',
+        'aria-label': t('reader.settings'),
+      },
+      h(
+        'div',
+        { className: 'er-play-panel' },
+        h(
+          'div',
+          { className: 'er-play-panel-head' },
+          h('span', { className: 'er-play-title' }, t('reader.settings')),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'er-round-icon',
+              title: t('reader.close'),
+              'aria-label': t('reader.close'),
+              onClick: () => { setTypographyOpen(false); },
+            },
+            h(CloseIcon, { size: 14 }),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'er-setting-row' },
+          h('span', { className: 'er-setting-label' }, t('reader.fontStyle')),
+          h(
+            'div',
+            { className: 'er-scope' },
+            ['sans', 'serif', 'mono'].map((style) => h(
+              'button',
+              {
+                key: style,
+                type: 'button',
+                className: 'er-scope-item',
+                'aria-pressed': settings.fontStyle === style,
+                onClick: () => { updateSettings({ fontStyle: style }); },
+              },
+              t(`reader.font${style.charAt(0).toUpperCase()}${style.slice(1)}`),
+            )),
+          ),
+        ),
+        h(
+          'div',
+          { className: 'er-setting-row' },
+          h('span', { className: 'er-setting-label' }, t('reader.fontSize')),
+          h('input', {
+            type: 'range', min: '16', max: '34', step: '1',
+            value: String(settings.fontSize),
+            'aria-label': t('reader.fontSize'),
+            onChange: (event) => { updateSettings({ fontSize: Number(event.target.value) }); },
+          }),
+          h('span', { className: 'er-setting-value' }, `${settings.fontSize}pt`),
+        ),
+        h(
+          'div',
+          { className: 'er-setting-row' },
+          h('span', { className: 'er-setting-label' }, t('reader.lineHeight')),
+          h('input', {
+            type: 'range', min: '0.4', max: '1.4', step: '0.05',
+            value: String(settings.lineHeight),
+            'aria-label': t('reader.lineHeight'),
+            onChange: (event) => { updateSettings({ lineHeight: Number(event.target.value) }); },
+          }),
+          h('span', { className: 'er-setting-value' }, `${(1.2 + settings.lineHeight).toFixed(2)}×`),
+        ),
+      ),
+    ) : null),
     floating(modePanelOpen ? renderModesPanel() : null),
     floating(noteEditor === null ? null : renderNoteEditor()),
     mindMapOpen

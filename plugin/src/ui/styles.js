@@ -20,7 +20,7 @@ import { TOKENS } from './tokens.js';
  * token block with them.
  */
 export const STYLE = `${TOKENS}
-.er-page{display:flex;flex-direction:column;height:100%;min-height:0;position:relative;background:var(--er-surface-0);color:var(--er-ink-1);font-family:var(--dsw-font,inherit);font-size:13px}.er-body{flex:1;min-height:0;overflow:auto;padding:24px 24px 48px}
+.er-page{display:flex;flex-direction:column;height:100%;min-height:0;position:relative;background:var(--er-surface-0);color:var(--er-ink-1);font-family:var(--dsw-font,inherit);font-size:13px;container-type:inline-size;container-name:erpage;--er-touch:32px;--er-gutter:24px;--er-shelf-min:168px}.er-body{flex:1;min-height:0;overflow:auto;padding:24px 24px 48px}
 .er-empty{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;height:100%;min-height:220px;color:var(--er-ink-3);text-align:center}
 .er-empty-title{font-size:16px;color:var(--er-ink-2);font-weight:500}
 .er-empty-hint{font-size:12px;max-width:420px;line-height:1.7}/* A notice, not a banner: the reading surface must not be interrupted by a
@@ -61,7 +61,10 @@ export const STYLE = `${TOKENS}
 .er-word:hover{background:var(--er-hover)}
 .er-word.is-spoken{background:var(--er-paper-ink-wash)}
 \.er-word\.is-current\{color:var\(--er-accent-ink\)\}
-.er-word.is-ok{color:var(--er-ok-ink)}
+/* A word read correctly keeps the paper's own ink: painting every matched
+   word green would turn the passage into a highlighter. Only the words that
+   differ from what was said get a mark. */
+.er-word.is-ok{text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--er-ok-ink) 42%,transparent);text-underline-offset:3px}
 .er-word.is-bad{color:var(--er-err-ink);text-decoration:underline wavy var(--er-err-ink)}
 .er-word.is-missing{color:var(--er-warn-ink);text-decoration:underline dotted var(--er-warn-ink)}
 .er-word.is-extra{color:var(--er-ink-3);text-decoration:line-through}
@@ -80,7 +83,7 @@ export const STYLE = `${TOKENS}
 .er-setting-hint{color:var(--er-ink-3);font-size:12px}
 .er-input-row{display:flex;justify-content:center;padding:12px 0}
 .er-input-row.is-hidden{opacity:0;height:0;padding:0;overflow:hidden;pointer-events:none}
-.er-word-input{width:min(560px,100%);box-sizing:border-box;padding:10px 16px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line-strong);background:var(--er-surface-1);box-shadow:none;color:var(--er-ink-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:18px;text-align:center}
+.er-word-input{max-width:100%;min-width:96px;box-sizing:border-box;padding:10px 16px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line-strong);background:var(--er-surface-1);box-shadow:none;color:var(--er-ink-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:18px;text-align:center}
 .er-word-input:focus{outline:none;border-color:var(--er-accent)}
 .er-word-input:focus-visible{outline:var(--er-focus);outline-offset:1px}
 .er-word-input::placeholder{color:var(--er-ink-3);opacity:.55}
@@ -89,11 +92,17 @@ export const STYLE = `${TOKENS}
 .er-scope{display:inline-flex;gap:2px;padding:2px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-3);align-self:center}
 .er-scope-item{appearance:none;border:0;border-radius:var(--dsw-radius-xs);padding:5px 12px;background:transparent;color:var(--er-ink-2);font:inherit;font-size:12px;cursor:pointer}
 .er-scope-item:hover{background:var(--er-hover)}
-.er-scope-item[aria-pressed="true"]{background:var(--er-surface-1);color:var(--er-ink-1);box-shadow:none}
+.er-scope-item[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink);box-shadow:none}
 /* The mode row stays put while the text scrolls: the controls are always
    within reach. */
-.er-modes{display:flex;gap:8px;flex-wrap:wrap;position:sticky;top:0;z-index:6;padding:8px 0;margin:-8px 0 8px}
+.er-modes{display:flex;gap:8px;flex-wrap:wrap;flex:none;position:sticky;top:0;z-index:6;padding:8px 0;margin:-8px 0 8px;background:var(--er-surface-0)}
+.er-mode-chips{display:flex;gap:8px;flex-wrap:wrap;min-width:0}
+.er-mode-text{white-space:nowrap}
 .er-mode{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background:var(--er-surface-1);box-shadow:var(--er-shadow-card);color:var(--er-ink-2);font:inherit;font-size:13px;cursor:pointer;transition:background-color var(--er-dur-hover) ease,border-color var(--er-dur-hover) ease,transform var(--er-dur-hover) ease}
+/* One selected style for the whole panel: a mode, a practice unit and an aid
+   are never "selected" in three different colours. */
+.er-mode[aria-pressed="true"]{background:var(--er-accent-soft);border-color:transparent;color:var(--er-accent-ink);font-weight:500}
+.er-mode:disabled{opacity:.45;cursor:not-allowed}
 /* The active mode is marked three ways: fill, edge and weight. Colour on
    its own would not carry the state. */
 .er-mode:hover{background:var(--er-hover)}
@@ -118,6 +127,12 @@ export const STYLE = `${TOKENS}
    icon only: the bar is one line, and a label each would push the reading
    figures off the edge. */
 .er-read-extra{width:28px;height:28px;flex:none;color:var(--er-ink-2)}
+/* The top bar is a row of icons: the word list keeps its icon and its count
+   badge, and drops the label (the name stays in the title and aria-label). */
+.er-reader.is-immersive .er-wordlist-button{position:relative;border:0;background:transparent;box-shadow:none;padding:0;width:28px;min-width:28px;height:28px;border-radius:999px;gap:0;justify-content:center;color:var(--er-ink-2)}
+.er-reader.is-immersive .er-wordlist-count{position:absolute;top:-2px;right:-4px;min-width:14px;height:14px;padding:0 3px;font-size:10px;box-shadow:0 0 0 2px var(--er-surface-0)}
+.er-reader.is-immersive .er-wordlist-button:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-reader.is-immersive .er-wordlist-label{display:none}
 .er-read-extra:hover{background:var(--er-hover);color:var(--er-ink-1)}
 .er-wordlist-count{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:999px;background:var(--er-accent);color:var(--er-on-accent);font-size:11px;line-height:1}
 .er-wordcard{position:fixed;z-index:1100;box-sizing:border-box;padding:16px 16px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);font-size:13px;color:var(--er-ink-1)}
@@ -332,11 +347,16 @@ export const STYLE = `${TOKENS}
 /* The read bar: three zones, separated by a hairline — the book you are
    reading, the place you are in it, and what you can do from here. The book
    is the heading, so it leads; the numbers about the book are the quietest. */
-.er-read-bar{display:flex;align-items:center;gap:12px;flex-wrap:nowrap;padding:9px 16px;border-bottom:1px solid var(--er-line);flex:none;white-space:nowrap;overflow:hidden;container-type:inline-size}
+.er-read-bar{display:block;padding:0;border-bottom:1px solid var(--er-line);flex:none;white-space:nowrap;overflow:hidden}
+/* The inner row keeps the content of the bar on the same frame as the paper.
+   When the panel is narrower than the frame the padding is all that is left,
+   so the two can never drift apart. The bar's own width is the container the
+   zones answer to. */
+.er-read-bar-inner{display:flex;align-items:center;gap:14px;flex-wrap:nowrap;box-sizing:border-box;max-width:var(--er-frame,none);margin:0 auto;padding:9px 16px;min-width:0;container-type:inline-size}
 .er-read-head{display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto}
 .er-read-title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600;color:var(--er-ink-1);letter-spacing:.01em}
-.er-read-place{display:flex;align-items:center;gap:10px;min-width:0;flex:0 1 auto;padding-left:12px;border-left:1px solid var(--er-line)}
-.er-read-counter{font-size:12px;color:var(--er-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.er-read-place{display:flex;align-items:center;gap:12px;min-width:0;flex:0 1 auto;padding-left:16px;border-left:1px solid var(--er-line)}
+.er-read-counter{flex:none;max-width:132px;font-size:12px;color:var(--er-ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* The chapter picker is a chip, not a form field: it is a place in the book,
    not a setting. */
 .er-read-chapter{appearance:none;-webkit-appearance:none;max-width:18ch;flex:none;padding:6px 26px 6px 10px;border-radius:var(--dsw-radius-sm);border:1px solid var(--er-line);background-color:var(--er-surface-1);box-shadow:none;background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);background-position:calc(100% - 14px) 55%,calc(100% - 10px) 55%;background-size:4px 4px,4px 4px;background-repeat:no-repeat;color:var(--er-ink-2);font:inherit;font-size:12px;line-height:1.4;text-overflow:ellipsis;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease,border-color var(--er-dur-hover) ease}
@@ -344,20 +364,33 @@ export const STYLE = `${TOKENS}
 .er-read-chapter:focus-visible{outline:var(--er-focus);outline-offset:1px}
 .er-read-chapter option{background:var(--er-surface-1);color:var(--er-ink-1)}
 /* The actions: one row of round buttons, then the word list. */
-.er-read-actions{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto;padding-left:12px;border-left:1px solid var(--er-line)}
+.er-read-actions{display:flex;align-items:center;justify-content:flex-end;gap:4px;flex:0 0 auto;margin-left:auto;padding-left:16px;border-left:1px solid var(--er-line)}
 .er-read-actions .er-round-icon{width:28px;height:28px}
-.er-read-stats{display:flex;align-items:center;gap:12px;flex:none;padding-left:14px;border-left:1px solid var(--er-line)}
+.er-read-stats{display:flex;align-items:center;gap:16px;flex:none;padding-left:16px;border-left:1px solid var(--er-line)}
 /* The bar answers to the width of the panel, not of the window: a narrow
    sidebar must not squeeze the title into nothing. The numbers go first, then
    the position. */
-@container (max-width: 1000px){.er-read-stats{display:none}}
-@container (max-width: 760px){.er-read-counter{display:none}}
-@container (max-width: 620px){.er-read-chapter{display:none}}
+/* The book is the heading of the bar and the figures are a reference: when
+   the bar is not wide enough for both, the figures go first. */
+/* A single line cannot hold the book, the place, the actions and the figures
+   once the frame is narrower than ~1300px: they end up shoulder to shoulder.
+   The bar becomes two rows there — the book and its place, then the actions
+   and the figures — so every zone keeps its own air. */
+@media (min-width: 901px){
+  .er-reader[data-bar-rows="2"] .er-read-bar-inner{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-areas:"head place place" "actions actions stats";align-items:center;gap:6px 14px;padding:8px 16px}
+  .er-reader[data-bar-rows="2"] .er-read-head{grid-area:head;min-width:0;flex:none}
+  .er-reader[data-bar-rows="2"] .er-read-place{grid-area:place;justify-self:end;border-left:0;padding-left:0;flex:none}
+  .er-reader[data-bar-rows="2"] .er-read-actions{grid-area:actions;margin-left:0;padding-left:0;border-left:0;flex-wrap:wrap}
+  .er-reader[data-bar-rows="2"] .er-read-stats{grid-area:stats;justify-self:end;padding-left:12px}
+}
+@container (max-width: 900px){.er-read-stats{display:none}}
+@container (max-width: 700px){.er-read-counter{display:none}}
+@container (max-width: 540px){.er-read-chapter{display:none}}
 .er-read-stat{font-size:12px;color:var(--er-ink-3);white-space:nowrap}
 .er-read-stat.is-learn{color:var(--er-warn-ink)}
 .er-read-stat.is-known{color:var(--er-ok-ink)}
-.er-read-main{display:flex;align-items:stretch;gap:16px;flex:1;min-height:0}
-.er-read-body{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;gap:16px;overflow:auto;padding-right:4px}
+.er-read-main{display:flex;align-items:stretch;justify-content:center;gap:16px;flex:1;min-height:0;width:100%;box-sizing:border-box;margin:0 auto;padding:0 16px}
+.er-read-body{flex:1 1 auto;width:min(100%,var(--er-measure,900px));min-width:0;max-width:100%;min-height:0;display:flex;flex-direction:column;gap:16px;overflow:hidden;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--er-ink-1) 22%,transparent) transparent}
 /* The reading tools float as a slim card of round tiles, the way the
    reference reader does it. */
 .er-read-tools{flex:none;display:flex;flex-direction:column;gap:4px;align-items:center;align-self:flex-start;position:sticky;top:4px;padding:8px 8px;border-radius:var(--dsw-radius-xl);background:var(--er-surface-1);border:1px solid var(--er-line);box-shadow:var(--er-shadow-card)}
@@ -375,7 +408,197 @@ export const STYLE = `${TOKENS}
 \.er-read-tool:disabled:hover \.er-read-tool-icon\{background:var\(--er-accent-soft\);color:var\(--er-accent-ink\)\}
 .er-read-tool-label{font-size:12px;line-height:1.2;text-align:center;color:var(--er-ink-3)}
 \.er-read-tool\[aria-pressed="true"\] \.er-read-tool-label\{color:var\(--er-accent-ink\);font-weight:500\}
-.er-read-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:16px;padding:12px 16px;border-top:1px solid var(--er-line);border-radius:var(--dsw-radius-md);background:var(--er-surface-1);box-shadow:var(--er-shadow-card);flex:none}
+.er-read-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:16px auto 0;padding:12px 16px;border-top:1px solid var(--er-line);border-radius:var(--dsw-radius-md);background:var(--er-surface-1);box-shadow:var(--er-shadow-card);flex:none;width:100%;max-width:var(--er-frame,none);box-sizing:border-box}
+/* Scrollbars inside the reader are part of the surface: thin, rounded and low
+   contrast, so a scrolled page never shows a bright system bar next to the
+   paper. */
+.er-read-body::-webkit-scrollbar{width:8px;height:8px}
+.er-read-body::-webkit-scrollbar-track{background:transparent}
+.er-read-body::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--er-ink-1) 20%,transparent);border-radius:999px;border:2px solid transparent;background-clip:padding-box}
+.er-read-body::-webkit-scrollbar-thumb:hover{background:color-mix(in srgb,var(--er-ink-1) 34%,transparent);background-clip:padding-box}
+
+/* ---- Immersive reading (desktop and tablet) -------------------------------
+   The reference the learner pointed at: the page owns the screen and the
+   chrome floats over it instead of stacking above it. The read bar stays a
+   single slim row, the mode strip and the tool rail become floating layers,
+   and the player becomes a pill at the foot of the page. Phones keep their
+   own layout: there the chrome is two rows by design. */
+.er-reader.is-immersive{position:relative;gap:0}
+.er-reader.is-immersive .er-read-bar{position:absolute;top:0;left:0;right:0;z-index:12;padding:8px 16px 0;border-bottom:0;background:transparent}
+.er-reader.is-immersive .er-read-actions{margin-left:auto;justify-content:flex-end;flex:0 0 auto}
+.er-reader.is-immersive .er-read-bar-inner{display:flex;grid-template:none;padding:6px 14px;border-radius:999px;background:color-mix(in srgb,var(--er-surface-1) 88%,transparent);border:1px solid var(--er-line);box-shadow:var(--er-shadow-card);backdrop-filter:blur(12px)}
+.er-reader.is-immersive .er-read-stats{display:none}
+.er-reader.is-immersive .er-modes-toggle{display:inline-flex}
+/* The reading frame fills the room the bar leaves. In the reading mode the
+   player floats at the foot, so the frame stops above it; in a practice mode
+   the dock below is in the flow, so the frame ends right above it. */
+.er-reader.is-immersive .er-read-main{position:relative;flex:1;min-height:0;padding:72px 0 100px;gap:0}
+.er-reader.is-immersive.is-mode-type .er-read-main,
+.er-reader.is-immersive.is-mode-speak .er-read-main{padding-bottom:0}
+/* The paper uses the full frame width here: the tool rail no longer takes a
+   column of its own. */
+.er-reader.is-immersive .er-read-body{width:100%;max-width:100%;margin:0 auto;padding:0 24px}
+.er-reader.is-immersive .er-reading-page{margin:0 auto;padding-top:18px;max-width:min(100%,max(calc(var(--er-column-width,68ch) + 75px),68cqw))}
+.er-reader.is-immersive .er-page-note{display:none}
+.er-tools-magnet{position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:7;width:72px;pointer-events:none}
+.er-tools-tab{position:absolute;right:0;top:50%;transform:translateY(-50%);width:20px;height:64px;display:flex;align-items:center;justify-content:center;border:1px solid var(--er-line);border-right:0;border-radius:12px 0 0 12px;background:var(--er-surface-1);color:var(--er-ink-3);font-size:16px;pointer-events:auto;cursor:pointer}
+.er-reader.is-immersive .er-read-tools{position:relative;right:auto;top:auto;transform:translateX(100%);z-index:auto;align-self:auto;opacity:0;pointer-events:none;transition:transform var(--er-dur-state) var(--er-ease),opacity var(--er-dur-hover) ease;background:color-mix(in srgb,var(--er-surface-1) 88%,transparent);backdrop-filter:blur(12px)}
+.er-tools-magnet.is-open .er-read-tools{transform:translateX(0);opacity:1;pointer-events:auto}
+.er-reader.is-immersive .er-read-tool{width:54px}
+.er-reader.is-immersive .er-read-tool-label{font-size:11px}
+/* The mode strip floats above the player, at the left foot of the page. */
+/* The practice panel: three zones (mode | unit | aids) in one pill, a
+   hairline between them and exactly one selected style, so the row reads as a
+   control panel instead of a line of unrelated chips. */
+.er-reader.is-immersive .er-modes{position:absolute;left:auto;right:24px;top:56px;bottom:auto;z-index:13;margin:0;padding:4px 6px;border-radius:999px;background:color-mix(in srgb,var(--er-surface-1) 90%,transparent);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);backdrop-filter:blur(12px);flex-wrap:nowrap;align-items:center;gap:0;overflow-x:auto;max-width:calc(100% - 48px);opacity:0;visibility:hidden;transition:opacity var(--er-dur-pop) var(--er-ease),visibility var(--er-dur-pop) var(--er-ease)}
+.er-reader.is-immersive.is-modes-open .er-modes,
+.er-reader.is-immersive .er-modes:focus-within,
+.er-reader.is-immersive .er-modes:hover{opacity:1;visibility:visible}
+.er-reader.is-immersive .er-scope-label{display:none}
+.er-reader.is-immersive .er-mode-chips{display:flex;gap:2px;flex-wrap:nowrap}
+.er-reader.is-immersive .er-scope{display:flex;gap:2px;margin-left:8px;padding:0 0 0 8px;border-left:1px solid var(--er-line);background:transparent;border-radius:0}
+.er-reader.is-immersive .er-modes-aids{display:flex;gap:2px;margin-left:8px;padding-left:8px;border-left:1px solid var(--er-line)}
+.er-reader.is-immersive .er-mode,
+.er-reader.is-immersive .er-scope-item{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 11px;border:0;border-radius:999px;background:transparent;box-shadow:none;color:var(--er-ink-2);font-size:12.5px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
+.er-reader.is-immersive .er-mode:hover,
+.er-reader.is-immersive .er-scope-item:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-reader.is-immersive .er-mode[aria-pressed="true"],
+.er-reader.is-immersive .er-scope-item[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink);font-weight:500}
+.er-reader.is-immersive .er-mode:focus-visible,
+.er-reader.is-immersive .er-scope-item:focus-visible{outline:var(--er-focus);outline-offset:1px}
+.er-reader.is-immersive .er-scope-item:disabled{opacity:.4;cursor:not-allowed}
+/* The player: a compact pill at the foot of the page instead of a full bar. */
+.er-reader.is-immersive .er-read-foot{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:10;width:auto;max-width:calc(100% - 48px);margin:0;padding:5px 12px;border-radius:999px;background:color-mix(in srgb,var(--er-surface-1) 92%,transparent);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);backdrop-filter:blur(12px);flex-wrap:nowrap;justify-content:center;gap:16px}
+.er-reader.is-immersive .er-read-foot .er-controls{gap:8px;flex-wrap:nowrap;align-items:center}
+.er-reader.is-immersive .er-read-foot .er-select{max-width:150px;flex:0 1 150px;min-width:0}
+.er-reader.is-immersive .er-read-foot .er-play-anchor{display:block}
+.er-reader.is-immersive .er-read-foot .er-play-badge{display:none}
+.er-reader.is-immersive .er-read-foot .er-read-position{white-space:nowrap}
+/* A bare dock (only a notice) still floats above the player. A practice bar
+   does not: it docks below the paper and takes its own height, because the
+   sentence being typed or read aloud must never sit under the controls that
+   practise it. */
+.er-reader.is-immersive .er-mode-dock{position:absolute;left:50%;bottom:74px;transform:translateX(-50%);z-index:9;width:min(680px,calc(100% - 48px));margin:0;background:color-mix(in srgb,var(--er-surface-1) 94%,transparent);backdrop-filter:blur(12px);box-shadow:var(--er-shadow-float);max-height:min(34vh,300px)}
+.er-reader.is-immersive .er-mode-dock.is-typing,
+.er-reader.is-immersive .er-mode-dock.is-read-aloud{position:relative;left:auto;bottom:auto;transform:none;z-index:auto;flex:none;margin:8px auto 10px;box-shadow:var(--er-shadow-card)}
+.er-type-panel{display:flex;flex-direction:column;gap:10px}
+.er-reader.is-immersive .er-mode-dock.is-typing{width:min(600px,calc(100% - 48px));max-height:min(30dvh,220px)}
+.er-reader.is-immersive .er-mode-dock.is-read-aloud{width:min(720px,calc(100% - 48px));max-height:min(52dvh,480px)}
+.er-mode-dock.is-read-aloud{max-height:min(70dvh,640px)}
+
+.er-speak-status{display:flex;align-items:center;gap:9px;min-height:26px;font-size:12px;color:var(--er-ink-2)}
+.er-speak-recording-dots{display:inline-flex;align-items:center;gap:4px}
+.er-speak-recording-dots span{width:6px;height:6px;border-radius:50%;background:var(--er-err);animation:er-record-pulse 1.2s infinite}
+.er-speak-recording-dots span:nth-child(2){animation-delay:.2s}
+.er-speak-recording-dots span:nth-child(3){animation-delay:.4s}
+.er-speak-clock{font-variant-numeric:tabular-nums;color:var(--er-ink-3)}
+.er-speak-spinner{width:13px;height:13px;border:2px solid var(--er-line);border-top-color:var(--er-accent);border-radius:50%;animation:er-speak-spin .7s linear infinite}
+.er-speak-done-mark{color:var(--er-ok-ink);font-size:15px;line-height:1}
+.er-speak-status.is-done{color:var(--er-ok-ink)}
+@keyframes er-record-pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.1)}}
+@keyframes er-speak-spin{to{transform:rotate(360deg)}}
+.er-speech-feedback{display:flex;flex-direction:column;gap:10px;margin-top:4px;padding-top:12px;border-top:1px solid var(--er-line)}
+.er-feedback-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.er-feedback-title{font-size:13px;font-weight:600;color:var(--er-ink-1)}
+.er-feedback-pace{font-size:12px;color:var(--er-ink-3);font-variant-numeric:tabular-nums}
+.er-feedback-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.er-feedback-item{display:flex;flex-direction:column;gap:3px;min-width:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-2);border-left:2px solid var(--er-line)}
+.er-feedback-item.is-good{border-left-color:var(--er-ok-ink)}
+.er-feedback-item.is-warn{border-left-color:var(--er-accent)}
+.er-feedback-item.is-bad{border-left-color:var(--er-err)}
+.er-feedback-label{font-size:11px;color:var(--er-ink-3)}
+.er-feedback-summary{font-size:12px;line-height:1.4;color:var(--er-ink-2)}
+.er-feedback-suggestions{display:flex;flex-direction:column;gap:5px;margin:0;padding-left:18px;font-size:12px;line-height:1.5;color:var(--er-ink-2)}
+.er-standard-pronunciation{align-self:flex-start}
+@container erpage (max-width: 600px){.er-feedback-grid{grid-template-columns:1fr}.er-feedback-item{min-height:44px}}
+@media (prefers-reduced-motion: reduce){.er-speak-recording-dots span,.er-speak-spinner{animation:none}}
+/* Turning the page lives in every practice bar, not only in the player. */
+.er-practice-nav{display:inline-flex;align-items:center;gap:2px;flex:none}
+.er-practice-nav-btn{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--er-ink-2);cursor:pointer}
+.er-practice-nav-btn:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-practice-nav-btn:focus-visible{outline:var(--er-focus);outline-offset:1px}
+/* The dictation needs one row of controls under the field, not three stacked
+   bands: the field and its buttons ride together. */
+.er-type-bar-row{display:flex;align-items:center;justify-content:center;gap:14px;flex-wrap:wrap}
+.er-type-bar-row .er-input-row{padding:0}
+.er-type-panel .er-type-actions{flex-wrap:nowrap;gap:6px}
+.er-type-actions{display:flex;align-items:center;justify-content:center;gap:8px}
+.er-type-action{gap:6px;color:var(--er-ink-2)}
+.er-type-action:hover{color:var(--er-ink-1)}
+
+.er-type-panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:20px}
+.er-type-metrics{display:flex;align-items:center;gap:14px}
+.er-type-hint{font-size:12px;color:var(--er-ink-3)}
+.er-type-panel-meta{font-size:12px;color:var(--er-ink-3);font-variant-numeric:tabular-nums}
+.er-type-panel-tail{display:flex;align-items:center;gap:10px}
+.er-play-status{display:none}
+/* Inside a practice bar the playback state is a row of that bar, not a layer
+   over the page: a floating pill is a pill the learner cannot click through
+   (it sat on the word input), and a phone has no player bar under it to give
+   the pause control a home. */
+.er-mode-dock .er-play-status{display:flex;align-items:center;gap:8px;position:static;align-self:stretch;justify-content:center;margin:0 0 2px;padding:4px 6px 4px 10px;border-radius:999px;background:var(--er-surface-2);border:1px solid var(--er-line);font-size:12px;color:var(--er-ink-2)}
+.er-reader.is-immersive .er-mode-dock .er-play-status{position:static;left:auto;bottom:auto;transform:none;z-index:auto;box-shadow:none;backdrop-filter:none}
+.er-page.is-reading .er-body{padding:0;overflow:hidden}
+.er-page.is-reading .er-reader{height:100%}
+.er-reader.is-immersive .er-play-status{display:flex;align-items:center;gap:8px;position:absolute;left:50%;bottom:62px;transform:translateX(-50%);z-index:9;padding:4px 6px 4px 10px;border-radius:999px;background:color-mix(in srgb,var(--er-surface-1) 92%,transparent);border:1px solid var(--er-line);box-shadow:var(--er-shadow-card);backdrop-filter:blur(12px);font-size:12px;color:var(--er-ink-2)}
+.er-play-status-dot{width:7px;height:7px;border-radius:50%;background:var(--er-accent);animation:er-play-pulse 1.6s ease-in-out infinite}
+.er-play-status-dot.is-paused{animation:none;opacity:.45}
+.er-play-status-count{color:var(--er-ink-3);font-variant-numeric:tabular-nums}
+.er-play-status-pause{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-left:2px;border:0;border-radius:50%;background:var(--er-accent-soft);color:var(--er-accent);cursor:pointer}
+.er-play-status-pause:hover{background:var(--er-hover)}
+.er-play-status-pause:focus-visible{outline:var(--er-focus);outline-offset:1px}
+@keyframes er-play-pulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1)}}
+@media (prefers-reduced-motion: reduce){.er-play-status-dot{animation:none}}
+.er-reader.is-immersive .er-mode-dock:empty{display:none}
+.er-typography-pop{z-index:1300}
+.er-typography-pop .er-play-panel{max-height:min(70vh,360px);padding:12px 14px}
+.er-typography-pop .er-setting-row{min-height:36px}
+.er-typography-pop input[type="range"]{accent-color:var(--er-accent);min-width:0;flex:1}
+.er-reader.is-immersive .er-paragraph-row{position:relative}
+.er-reader.is-immersive .er-paragraph-main{padding-right:36px}
+.er-reader.is-immersive .er-paragraph-actions{position:absolute;right:0;top:0;flex-direction:column;align-items:flex-end;gap:4px}
+
+/* Scrollbars never become a second strip of chrome. Scrolling still works
+   with the wheel, a trackpad, touch and the keyboard; only the bar is hidden. */
+.er-page *,.er-wordcard *,.er-modal *,.er-play-pop *,.er-modes-panel *,.er-note-editor *{scrollbar-width:none}
+.er-page *::-webkit-scrollbar,.er-wordcard *::-webkit-scrollbar,.er-modal *::-webkit-scrollbar,.er-play-pop *::-webkit-scrollbar,.er-modes-panel *::-webkit-scrollbar,.er-note-editor *::-webkit-scrollbar{display:none}
+
+.er-modes-toggle{display:none}
+.er-modes-toggle-glyph{font-size:12px;font-weight:600;letter-spacing:.02em}
+
+/* The mode panels (typing and read-aloud) dock below the reading frame, above
+   the player bar: a control that lives at the end of the paper card is a
+   control the learner has to scroll the whole page to reach. The dock never
+   scrolls with the text, and it disappears when the mode has nothing to show. */
+.er-mode-dock{flex:none;display:flex;flex-direction:column;gap:8px;width:100%;max-width:var(--er-frame,none);max-height:min(34vh,320px);overflow:auto;box-sizing:border-box;margin:12px auto 0;padding:12px 14px;border-radius:var(--dsw-radius-md);background:var(--er-surface-1);border:1px solid var(--er-line);box-shadow:var(--er-shadow-card)}
+/* The practice bars are one row of controls, not a panel: the mode owns a bar,
+   and the review of a read-aloud is a panel of its own. */
+.er-mode-dock.is-typing,.er-mode-dock.is-read-aloud{padding:8px 12px}
+.er-type-bar{display:flex;flex-direction:row;align-items:center;gap:12px;flex-wrap:nowrap}
+.er-type-bar-status{display:flex;align-items:center;gap:10px;min-width:0;flex:none}
+.er-type-bar .er-input-row{flex:1 1 auto;min-width:0;justify-content:center;padding:0}
+.er-type-bar .er-type-actions{flex:none;gap:6px;flex-wrap:nowrap}
+/* Icon buttons in the practice bars wear the same round shape as the player's:
+   a bar of square chips reads as a form, a row of circles reads as controls. */
+.er-type-bar .er-btn-icon,.er-speak-bar .er-btn-icon{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:50%;background:transparent;color:var(--er-ink-2)}
+.er-type-bar .er-btn-icon:hover,.er-speak-bar .er-btn-icon:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-type-bar .er-btn-icon[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink)}
+.er-type-bar .er-btn-icon:focus-visible,.er-speak-bar .er-btn-icon:focus-visible{outline:var(--er-focus);outline-offset:1px}
+.er-speak-bar{display:flex;flex-direction:row;align-items:center;gap:14px;justify-content:space-between}
+.er-speak-line{display:flex;align-items:center;gap:8px;min-width:0;flex:1 1 auto;font-size:12px;color:var(--er-ink-2)}
+.er-speak-line .er-speak-status-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.er-speak-actions{display:flex;align-items:center;gap:6px;flex:none}
+.er-speak-bar .er-btn-primary{padding:8px 14px}
+.er-paragraph-action.is-analysis{color:var(--er-accent)}
+.er-analysis{display:flex;flex-direction:column;gap:14px}
+.er-analysis-heard{display:flex;flex-direction:column;gap:6px}
+.er-analysis-text{margin:0;padding:10px 12px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-2);border:1px solid var(--er-line);font-size:13px;line-height:1.6;color:var(--er-ink-1);white-space:pre-wrap}
+.er-mode-dock:empty{display:none}
+.er-mode-dock .er-panel{gap:8px}
+.er-mode-dock .er-type-panel{position:static;padding:0;border-top:0;background:transparent;z-index:auto}
+.er-mode-dock .er-input-row{padding:0}
+.er-mode-dock .er-controls{flex-wrap:wrap}
+.er-mode-dock .er-transcript{min-height:34px}
 /* The player uses round buttons, like the reference app. */
 .er-read-foot .er-btn-icon,.er-round-icon{display:inline-flex;font:inherit;align-items:center;justify-content:center;width:32px;height:32px;padding:0;border-radius:50%;border:1px solid transparent;background:transparent;color:var(--er-ink-2)}
 .er-read-foot .er-btn-icon:hover,.er-round-icon:hover{background:var(--er-hover);color:var(--er-ink-1)}
@@ -445,16 +668,23 @@ export const STYLE = `${TOKENS}
 
 /* The column width follows the setting; the reading area never gets wider
    than the window. */
-.er-reading-page{display:flex;flex-direction:column;gap:12px;max-width:var(--er-column-width,68ch);margin:0 auto;width:100%}
+/* The paper is the frame, not a sheet that scrolls: it fills the reading area
+   and the text scrolls inside it, so the page edges never move under the eye. */
+.er-reading-page{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;box-sizing:border-box;max-width:calc(var(--er-column-width,68ch) + 75px);margin:0 auto;width:100%}
+.er-reading-scroll{flex:1;min-height:0;display:flex;flex-direction:column;gap:12px;overflow:auto;overscroll-behavior:contain}
+/* When even the smallest page is taller than the paper the text scrolls, and
+   the line at the bottom edge fades out instead of being cut through the
+   middle of its letters. */
+.er-reading-scroll.is-clipped{-webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - var(--er-clip-fade,16px)),transparent 100%);mask-image:linear-gradient(to bottom,#000 calc(100% - var(--er-clip-fade,16px)),transparent 100%)}
 /* The brass rail: the reader's one signature device. It runs down the left
    edge of the page and fills as the book is read. */
-.er-reading-page::before{content:'';position:absolute;left:0;top:14px;bottom:14px;width:3px;border-radius:999px;background:linear-gradient(to bottom,var(--er-accent) 0 var(--er-progress,0%),var(--er-accent-soft) var(--er-progress,0%) 100%)}
+.er-reading-page::before{content:'';position:absolute;left:0;top:16px;bottom:16px;width:2px;border-radius:999px;background:linear-gradient(to bottom,var(--er-accent) 0 var(--er-progress,0%),color-mix(in srgb,var(--er-accent) 16%,transparent) var(--er-progress,0%) 100%);opacity:.85}
 /* The reading surface leans on size and colour, not on boxes: the paragraph
    being read is large and dark, the ones around it are smaller and quiet. */
 .er-page-paragraph{margin:0}
 /* The context paragraphs follow the size the learner picked, a little smaller. */
-.er-page-paragraph.is-context{font-size:calc(var(--er-text-size, 18px) * .82);line-height:1.85;color:color-mix(in oklab,var(--er-paper-ink) 78%,transparent)}
-.er-page-paragraph.is-active{font-size:var(--er-text-size, 18px);line-height:2;color:var(--er-paper-ink)}
+.er-page-paragraph.is-context{font-size:calc(var(--er-text-size, 18px) * .82);line-height:var(--er-reading-line-height,1.85);color:color-mix(in oklab,var(--er-paper-ink) 78%,transparent)}
+.er-page-paragraph.is-active{font-size:var(--er-text-size, 18px);line-height:var(--er-reading-line-height,1.95);color:var(--er-paper-ink)}
 .er-sentence.is-active-sentence{background:var(--er-accent-soft);border-radius:var(--dsw-radius-xs);box-shadow:0 0 0 3px var(--er-accent-soft)}
 
 /* Every paragraph carries a row of buttons in its right gutter: take a note,
@@ -507,6 +737,8 @@ export const STYLE = `${TOKENS}
    that opened it and positioned in viewport coordinates, so the sticky mode
    row can never paint over it and it can never be cut off by a scroll
    container. */
+.er-mode-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid var(--er-line)}
+.er-mode-actions .er-mode{justify-content:center;min-width:0;padding:7px 6px}
 .er-modes-panel{position:fixed;z-index:1200;box-sizing:border-box;max-height:min(62vh,440px);overflow:auto;padding:12px 16px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float)}
 .er-mode-row{display:flex;align-items:center;gap:12px;padding:8px 0;cursor:pointer}
 .er-mode-row+.er-mode-row{border-top:1px solid var(--er-line)}
@@ -685,13 +917,391 @@ export const STYLE = `${TOKENS}
 .er-source-pages{display:flex;flex-direction:column;align-items:center;gap:12px;padding:12px}
 .er-source-page{display:block;max-width:100%;height:auto;border-radius:var(--dsw-radius-xs);box-shadow:var(--er-shadow-float);background:#fff}
 .er-source-foot{display:flex;justify-content:flex-end;gap:8px;margin-top:4px}
+
+
+/* =============================================================================
+   移动端与窄面板（phone ≤600px / tablet 601–900px / desktop ≥901px）
+   -----------------------------------------------------------------------------
+   面板宽度不是窗口宽度：桌面应用里侧栏一开，面板就只剩几百像素。所以布局
+   一律问"面板有多宽"（@container erpage），只有渲染到 body 的浮层（词卡、
+   学习模式、笔记、播放设置）才问视口（@media）。两套查询不互相覆盖。
+
+   移动端不引入第二套视觉语言：同一个黄铜、同一张纸、同一套圆角；改的只有
+   密度、触控尺寸和浮层的形态。
+   ========================================================================== */
+
+/* ---- 触屏（平板、触摸笔记本、手机）：手指没有 hover，也没有 1px 的准头。
+   所有可点的东西先抬到 40，手机档在下面的容器查询里再抬到 44。
+   开关的轨道只有 26px 高，命中区由按钮自己的 44px 盒子和伪元素轨道分开承担：
+   看得见的是轨道，点得到的是 44 的盒子。 ---- */
+@media (pointer: coarse){
+  .er-round-button{width:44px;height:44px}
+  .er-segmented-item{min-height:44px}
+  .er-library-search input{min-height:44px}
+  .er-view-switch-item{width:44px;height:44px;justify-content:center;padding:0}
+  .er-cover-listen{width:44px;height:44px}
+  .er-cover-menu{width:44px;height:44px}
+  .er-cover-menu svg{width:56%;height:56%}
+  /* 列表视图的小封面只有 46px 宽，两个圆钮各占 17px；列表行本身已经带
+     朗读/打开/删除三个按钮，所以圆钮让位，缩略图整体就是一个打开目标。 */
+  .er-book-cover-small .er-cover-action{display:none}
+  .er-book-menu-item{min-height:44px}
+  .er-read-chapter{min-height:44px}
+  .er-round-icon,.er-read-foot .er-btn-icon{width:44px;height:44px}
+  .er-wordlist-button{min-height:44px}
+  .er-mode{min-height:44px}
+  .er-scope-item{min-height:36px}
+  .er-paragraph-actions{display:none}
+  .er-paragraph-row.is-active{flex-wrap:wrap}
+  .er-paragraph-row.is-active .er-paragraph-main{flex:1 0 100%}
+  .er-paragraph-row.is-active .er-paragraph-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:8px}
+  .er-paragraph-action{width:44px;height:44px;background:var(--er-surface-1);border:1px solid var(--er-line);border-radius:var(--dsw-radius-sm);color:var(--er-ink-2)}
+  .er-read-tool{min-height:64px}
+  .er-read-foot .er-btn{min-height:44px}
+  .er-read-foot .er-select{min-height:44px}
+  .er-play-segment-item{min-height:44px}
+  .er-play-select{min-height:44px}
+  .er-modal .er-round-button{width:44px;height:44px}
+  .er-modal .er-btn{min-height:44px}
+  .er-toc-row{min-height:44px}
+  .er-note-delete,.er-note-editor-delete{width:44px;height:44px;justify-content:center}
+  .er-note-link{min-height:44px;display:inline-flex;align-items:center}
+  .er-wordlist-close{width:44px;height:44px}
+  .er-wordlist-chip{min-height:44px}
+  .er-wordlist-search{min-height:44px}
+  .er-wordlist-word{min-height:44px;display:inline-flex;align-items:center}
+  .er-wordlist-speak,.er-wordlist-delete{width:44px;height:44px;justify-content:center}
+  .er-wordlist-review-button{min-height:44px}
+  .er-mm-switch-item{min-height:44px}
+  .er-mm .er-btn{min-height:44px}
+  .er-pod-btn{min-width:44px;min-height:44px}
+  .er-pod-generate{min-height:44px}
+  .er-pod-head .er-select,.er-pod-voice-select,.er-pod-rate-select{min-height:44px}
+  .er-source-foot .er-btn,.er-source-nav .er-btn{min-height:44px}
+  .er-source-picker{min-height:44px}
+  .er-type-icon{width:44px;height:44px;justify-content:center}
+  .er-switch{position:relative;width:48px;height:44px;border:0;background:transparent}
+  .er-switch::before{content:'';position:absolute;left:0;right:0;top:50%;height:26px;margin-top:-13px;border-radius:999px;border:1px solid var(--er-line-strong);background:var(--er-surface-3);transition:background-color var(--er-dur-state) var(--er-ease)}
+  .er-switch::after{top:50%;left:3px;margin-top:-10px;width:20px;height:20px}
+  .er-switch[aria-checked="true"]{background:transparent}
+  .er-switch[aria-checked="true"]::before{background:var(--er-accent);border-color:var(--er-accent)}
+  .er-switch[aria-checked="true"]::after{transform:translateX(22px);background:var(--er-on-accent)}
+  /* These controls are sized by a more specific rule in the base sheet (the
+     action group of the read bar, the anchor of the transport bar), so the
+     touch size has to match that specificity to win. */
+  .er-read-actions .er-round-icon,
+  .er-read-actions .er-wordlist-button{width:44px;height:44px;min-width:44px}
+  .er-read-actions .er-wordlist-label{display:none}
+  .er-read-actions .er-wordlist-count{margin-left:0}
+  .er-read-foot .er-play-anchor .er-round-icon{height:44px;min-width:44px}
+  .er-wordcard-icon{width:44px;height:44px;justify-content:center}
+  .er-wordcard .er-btn{min-height:44px}
+  .er-page .er-pod-talk-input{min-height:44px;font-size:16px}
+  .er-page .er-pod-talk-send{min-height:44px;min-width:44px}
+  .er-wordlist-chip{min-width:44px}
+  .er-page .er-mm-bar .er-btn,.er-page .er-mm .er-btn{min-height:44px}
+  .er-page .er-pod-episode-delete{width:44px;height:44px;justify-content:center;flex:none}
+  .er-play-panel-head button{min-width:44px;min-height:44px}
+  .er-note-editor-close{width:44px;height:44px;justify-content:center}
+}
+
+/* ---- 平板：密度略降，纸面仍然占满可用宽度 ---- */
+@container erpage (max-width: 900px){
+  .er-appbar,.er-body,.er-reader,.er-library,.er-wordlist{--er-touch:40px;--er-gutter:20px;--er-shelf-min:150px}
+  .er-body{padding:var(--er-gutter) var(--er-gutter) 40px}
+  .er-library-cards{grid-template-columns:repeat(3,1fr)}
+  .er-library-card{padding:12px 14px}
+  .er-book-grid{grid-template-columns:repeat(auto-fill,minmax(var(--er-shelf-min,150px),1fr))}
+}
+
+/* ---- 手机 ---- */
+@container erpage (max-width: 600px){
+  .er-appbar,.er-body,.er-reader,.er-library,.er-wordlist{--er-touch:44px;--er-gutter:16px;--er-shelf-min:132px}
+  .er-body{padding:var(--er-gutter) var(--er-gutter) calc(40px + env(safe-area-inset-bottom))}
+
+  /* 顶部工具条：图标一行，分段 tab 一行占满宽度。三段在 390px 下必须都看得见，
+     所以它们不裁切、不隐藏，只换行。 */
+  /* One row: two round buttons, the three section tabs and the shelf menu.
+     The tabs shrink to their labels instead of wrapping to a second row —
+     the row of chrome is the most expensive space on a phone screen. */
+  .er-appbar{flex-wrap:nowrap;gap:6px;padding:8px 12px;position:relative}
+  .er-appbar-left,.er-appbar-right{min-width:0;gap:4px;flex:none}
+  .er-appbar-right{margin-left:0}
+  .er-round-button{width:44px;height:44px;flex:none}
+  .er-segmented{flex:1 1 auto;min-width:0;margin:0;display:flex;gap:2px;padding:3px}
+  .er-segmented-item{flex:1 1 auto;min-width:0;padding:10px 6px;font-size:13px;min-height:44px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .er-book-menu-top{top:calc(100% + 6px);left:12px;right:12px;min-width:0}
+
+  /* 书库：统计压成一行三格；搜索与视图切换一行；书架两列。 */
+  .er-library{margin-top:12px;gap:12px}
+  .er-library-cards{grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+  .er-library-card{padding:10px 10px}
+  .er-library-card-label{font-size:12px;letter-spacing:.02em;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .er-library-card-number{font-size:16px}
+  .er-library-card-unit{font-size:12px}
+  .er-library-toolbar{gap:8px}
+  .er-library-search input{min-height:var(--er-touch);font-size:16px}
+  .er-view-switch-item{width:var(--er-touch);height:var(--er-touch);justify-content:center;padding:0}
+  .er-book-grid{grid-template-columns:repeat(auto-fill,minmax(var(--er-shelf-min,132px),1fr));gap:16px 12px}
+  .er-book-list{gap:10px}
+  .er-book{flex-wrap:wrap;gap:12px;padding:12px}
+  .er-book-cover-small{width:64px}
+  .er-book-main{flex:1 1 calc(100% - 76px)}
+  .er-book-actions{flex:1 0 100%;display:grid;grid-template-columns:1fr 1fr auto;gap:8px}
+  .er-book-actions .er-btn{min-height:var(--er-touch);justify-content:center}
+  .er-book-actions .er-btn-icon{width:var(--er-touch);min-width:var(--er-touch)}
+  .er-book-menu{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));top:auto;min-width:0}
+  .er-book-menu-item{min-height:48px;font-size:14px}
+  .er-book-progress,.er-book-stats,.er-book-meta{font-size:12px}
+
+  /* 导入卡片贴底并让出安全区。 */
+  .er-import{left:0;right:0;bottom:0;width:100%;max-width:none;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;padding:12px 16px calc(12px + env(safe-area-inset-bottom));transform:none}
+  .er-page.is-importing .er-body{padding-bottom:180px}
+
+  /* 阅读条：两行。第一行是书名与操作，第二行是章节与位置——位置在手机上
+     必须看得见，所以那两条"窄了就先藏"的容器规则在这里让位。 */
+  .er-read-bar{padding:0}
+  /* Two rows on a phone: the book and its actions, then the place in the
+     book. The actions are placed by grid instead of a wrapper row, so the
+     title keeps a readable width instead of being squeezed to a few
+     characters between two blocks of buttons. */
+  .er-read-bar-inner{display:grid;grid-template-columns:var(--er-touch) minmax(0,1fr) var(--er-touch) var(--er-touch);grid-template-areas:"exit title notes words" "place place mind pod";align-items:center;gap:4px 6px;padding:6px 12px;max-width:none;box-sizing:border-box}
+  .er-read-head{display:contents}
+  .er-exit-button{grid-area:exit;width:var(--er-touch);height:var(--er-touch)}
+  .er-read-title{grid-area:title;font-size:15px}
+  .er-read-place{grid-area:place;flex-wrap:nowrap;padding-left:0;border-left:0;gap:8px;min-height:var(--er-touch);min-width:0}
+  .er-read-actions{display:contents}
+  .er-read-actions > :nth-child(1){grid-area:notes}
+  .er-read-actions > :nth-child(2){grid-area:mind}
+  .er-read-actions > :nth-child(3){grid-area:pod}
+  .er-read-actions > :nth-child(4){grid-area:words}
+  .er-read-actions .er-round-icon,
+  .er-read-actions .er-wordlist-button{width:var(--er-touch);height:var(--er-touch);min-width:0;padding:0;justify-content:center;position:relative}
+  .er-read-actions .er-wordlist-label{display:none}
+  .er-read-chapter,.er-read-counter{display:block}
+  /* The chapter select takes whatever is left after the position; the
+     position itself is never squeezed out (a flex-basis of 0 keeps the
+     select from claiming its full intrinsic width first). */
+  .er-read-chapter{max-width:none;flex:1 1 0;min-width:0;min-height:var(--er-touch);font-size:13px}
+  .er-read-counter{flex:none;font-size:12px}
+  .er-read-stats,.er-read-stat{display:none}
+
+  /* 阅读主体：正文全宽，学习模式行横向滚动，竖向工具轨改成底部横条。 */
+  .er-reader{gap:0;--er-read-rail:0px}
+  .er-read-main{flex-direction:column;gap:0;max-width:none;padding:0}
+  .er-read-body{padding:0;overflow:hidden}
+  /* Two rows, nothing to scroll: the practice modes on top, the practice unit
+     (and the full-text switch) under them. The unit is the control touched
+     most often after the mode, so it never hides behind a horizontal scroll;
+     8 controls fit in two 44 pixel rows because the rows are split by what
+     they do, not squeezed into one line. */
+  /* Two rows: the modes take the first one, the practice unit shares the
+     second with the translation toggle, which sits at the far end where a
+     reading aid belongs. */
+  .er-modes{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"chips chips" "scope aids";flex:none;gap:6px 8px;align-items:center;overflow:visible;padding:8px 12px;margin:0;box-shadow:0 6px 10px -10px rgba(0,0,0,.45)}
+  .er-mode-chips{grid-area:chips;flex:none;flex-wrap:nowrap;min-width:0;overflow-x:auto;overflow-y:hidden;gap:8px;padding:0;scrollbar-width:none}
+  .er-modes .er-scope{grid-area:scope;justify-self:start;align-self:center}
+  .er-modes-aids{grid-area:aids;justify-self:end;align-self:center;display:flex}
+  .er-mode-chips::-webkit-scrollbar{display:none}
+  .er-mode{flex:none;min-height:var(--er-touch);padding:8px 12px}
+  /* The group keeps its accessible name; the visible "Practice unit" caption
+     costs 80 pixels of a 358 pixel row and is not needed next to three
+     self-explaining options. */
+  .er-scope-label{display:none}
+  .er-scope{flex:none;align-self:flex-start;padding:2px;max-width:100%}
+  .er-scope-item{min-height:var(--er-touch);padding:6px 12px}
+  .er-translate-toggle{flex:none;margin-left:0;width:var(--er-touch);justify-content:center;padding:8px 0}
+  .er-translate-toggle .er-mode-text{display:none}
+  .er-reading-page{padding:20px 16px 20px 26px;margin:0;border-radius:var(--dsw-radius-md)}
+  .er-page-note{font-size:12px;margin-bottom:12px}
+  .er-page-note-keys{display:none}
+  .er-paragraph{font-size:17px;line-height:1.9}
+  .er-page-paragraph.is-context{font-size:calc(var(--er-text-size,18px) * .86);line-height:var(--er-reading-line-height,1.9)}
+  .er-page-paragraph.is-active{font-size:var(--er-text-size,18px);line-height:var(--er-reading-line-height,1.95)}
+  /* 段落四角的三个按钮：触屏没有 hover，只在正在读的那一段下方常显，
+     每一颗都是 44 的触控目标；上下文段落保持纯文本，不铺满一屏按钮。 */
+  .er-paragraph-row{gap:0}
+  .er-paragraph-actions{display:none}
+  .er-paragraph-row.is-active{flex-wrap:wrap}
+  .er-paragraph-row.is-active .er-paragraph-main{flex:1 0 100%}
+  .er-paragraph-row.is-active .er-paragraph-actions{display:flex;justify-content:flex-end;gap:8px;padding-top:10px}
+  .er-paragraph-action{width:var(--er-touch);height:var(--er-touch);background:var(--er-surface-1);border:1px solid var(--er-line);border-radius:var(--dsw-radius-sm);color:var(--er-ink-2)}
+  .er-paragraph-action:hover{background:var(--er-hover)}
+  .er-read-tools{order:2;flex-direction:row;align-items:stretch;justify-content:space-between;position:static;align-self:stretch;box-sizing:border-box;width:100%;max-width:none;padding:4px 6px;gap:2px;border-radius:0;border:0;border-top:1px solid var(--er-line);box-shadow:none;background:var(--er-surface-1)}
+  .er-read-tool{flex:1 1 0;width:auto;min-height:calc(var(--er-touch) + 8px);flex-direction:column;justify-content:center;gap:3px;padding:6px 2px;border-radius:var(--dsw-radius-sm)}
+  .er-read-tool-icon{width:30px;height:30px}
+  .er-read-tool-label{font-size:12px;line-height:1.2;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .er-read-tool:hover .er-read-tool-icon{transform:none}
+
+  /* 播放条：一行，主播放键 44，次要键 44；速度与音色在小屏上横向滑动可达。 */
+  .er-read-foot{flex-wrap:wrap;overflow:visible;gap:6px 8px;margin-top:0;padding:8px 12px calc(8px + env(safe-area-inset-bottom));border-radius:0;border-top:1px solid var(--er-line);box-shadow:none;position:sticky;bottom:0;z-index:7}
+  .er-read-foot .er-controls{flex:1 1 100%;flex-wrap:nowrap;gap:6px;justify-content:space-between}
+  .er-read-foot .er-controls:last-child{justify-content:flex-start;gap:8px}
+  .er-read-foot .er-btn{min-height:var(--er-touch);min-width:var(--er-touch);justify-content:center}
+  .er-read-foot .er-btn-primary{padding:10px 18px;font-size:14px;flex:none}
+  .er-read-foot .er-btn-icon,.er-read-foot .er-round-icon{width:var(--er-touch);height:var(--er-touch)}
+  .er-read-foot .er-select{min-height:var(--er-touch);font-size:16px;max-width:none}
+  .er-read-foot .er-controls:last-child{min-width:0}
+  .er-read-foot .er-controls:last-child .er-select{min-width:0}
+  .er-read-foot .er-controls:last-child .er-select:first-of-type{flex:0 0 auto}
+  .er-read-foot .er-controls:last-child .er-select:last-of-type{flex:1 1 0;width:0}
+  .er-read-foot .er-play-anchor .er-round-icon{min-width:var(--er-touch);height:var(--er-touch);padding:0 10px}
+  .er-read-foot .er-label{display:none}
+  .er-read-position{margin-left:auto;white-space:nowrap}
+
+  /* 打字/朗读面板：贴底、让出安全区，输入框 16px 起（iOS 不缩放）。 */
+  .er-type-bar{position:sticky;top:0;z-index:5;background:var(--er-surface-0);padding:6px 12px;gap:12px}
+  .er-type-icon{width:var(--er-touch);height:var(--er-touch);justify-content:center}
+  /* The practice dock is the phone's bottom edge now that the player bar
+     belongs to the reading mode: keep it shallow so the text keeps the
+     screen, let it scroll inside itself, and clear the home indicator. */
+  .er-mode-dock{max-height:min(38dvh,300px);margin:8px auto 0;padding:10px 12px calc(10px + env(safe-area-inset-bottom))}
+  .er-mode-dock .er-type-panel{padding:0}
+  .er-type-panel{padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:var(--er-surface-0)}
+  .er-word-input{font-size:16px;min-height:var(--er-touch);padding:10px 12px}
+  .er-input-row{padding:8px 0}
+  .er-type-panel .er-btn{min-height:var(--er-touch)}
+  .er-settings{padding:12px}
+  .er-setting-row{flex-wrap:wrap}
+  .er-setting-label{width:auto;flex:1 1 100%}
+  .er-replacements{font-size:16px}
+  .er-transcript{font-size:14px}
+
+  /* 弹窗（词频、详情、重命名、目录、设置、笔记、思维导图、播客、源文件）：
+     手机上一律从底部升起、近全屏。 */
+  .er-modal-mask{align-items:flex-end;padding:0}
+  .er-modal{width:100%;max-width:none;max-height:92dvh;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;border-bottom:0;padding:12px 16px calc(16px + env(safe-area-inset-bottom))}
+  .er-modal.is-wide{width:100%;max-width:none;max-height:94dvh}
+  .er-modal-close,.er-modal .er-round-button{width:var(--er-touch);height:var(--er-touch)}
+  .er-modal-head{margin-bottom:12px}
+  .er-toc-row{min-height:var(--er-touch)}
+  .er-toc{max-height:60dvh}
+  .er-frequency-row{grid-template-columns:76px 1fr 36px}
+  .er-details-row{flex-wrap:wrap;gap:2px 12px;font-size:14px}
+  .er-details-label{width:auto;flex:0 0 100%}
+  .er-rename-input,.er-note-input,.er-note-editor-input{font-size:16px;min-height:var(--er-touch)}
+  .er-notes{max-height:64dvh}
+  .er-note-delete,.er-note-editor-delete{width:var(--er-touch);height:var(--er-touch);justify-content:center}
+  .er-source-nav{flex-wrap:wrap}
+  .er-source-picker{min-height:var(--er-touch);font-size:16px;flex:1 1 100%}
+
+  /* 生词本：抽屉变全屏层；页面版改成单列。 */
+  .er-wordlist-panel{width:100%;max-width:none;border-right:0}
+  .er-wordlist-head{padding:12px 16px;min-height:56px}
+  .er-wordlist-close{width:var(--er-touch);height:var(--er-touch)}
+  .er-wordlist-body{padding:16px}
+  .er-wordlist-progress{flex-direction:column;align-items:stretch;gap:16px;padding:16px}
+  .er-wordlist-stats{max-width:none}
+  .er-wordlist-ring{align-self:center}
+  .er-wordlist-review-button{min-height:var(--er-touch)}
+  .er-wordlist-chip{min-height:var(--er-touch);padding:8px 14px}
+  .er-wordlist-search{min-height:var(--er-touch);font-size:16px}
+  .er-wordlist-row{padding:12px}
+  .er-wordlist-word{min-height:var(--er-touch);display:inline-flex;align-items:center;font-size:16px}
+  .er-wordlist-speak,.er-wordlist-delete{width:var(--er-touch);height:var(--er-touch);justify-content:center}
+  .er-wordlist-delete{flex:none}
+  .er-wordlist-actions{gap:6px}
+  .er-wordlist.is-page .er-wordlist-head{padding:0 16px 8px}
+  .er-wordlist.is-page .er-wordlist-body{padding:0 16px 32px}
+  .er-wordlist.is-page .er-wordlist-progress{padding:16px;flex-direction:column;align-items:stretch;gap:14px}
+  .er-wordlist.is-page .er-wordlist-added{align-self:center;text-align:center}
+  .er-wordlist.is-page .er-wordlist-review-button{width:100%}
+  .er-wordlist.is-page .er-wordlist-list{max-width:none}
+
+  /* 空态/错误/骨架的密度 */
+  .er-state{padding:24px 16px}
+  .er-empty-hint{font-size:12px}
+  .er-crash{padding:24px 16px}
+  .er-crash-actions{flex-direction:column;width:100%}
+  .er-crash-actions .er-btn{min-height:var(--er-touch);justify-content:center}
+
+  /* 键盘弹起时，阅读区让出被遮住的高度（--er-keyboard-inset 由
+     responsive.js 按 visualViewport 写入），打字面板就不会被压在键盘后面。 */
+  .er-reader{height:calc(100% - var(--er-keyboard-inset, 0px))}
+  .er-page{--er-keyboard-inset:0px}
+}
+
+/* ---- 浮层：词卡 / 学习模式 / 笔记 / 播放设置 ----
+   它们渲染在 body 上（避开面板的滚动容器与层叠上下文），所以只能按视口判断。
+   手机上变成底部 sheet：可关闭、有拖动把手、最大 70–80dvh。 */
+@media (max-width: 600px){
+  .er-wordcard.is-sheet,
+  .er-modes-panel.is-sheet,
+  .er-note-editor.is-sheet,
+  .er-play-pop.is-sheet{
+    position:fixed;left:0;right:0;bottom:0;top:auto;width:auto;max-width:none;
+    max-height:min(80dvh,640px);border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;border-bottom:0;
+    padding:8px 16px calc(16px + env(safe-area-inset-bottom));
+    overflow:auto;overscroll-behavior:contain;z-index:1300;
+    animation:er-sheet-in 220ms var(--er-ease);
+  }
+  .er-wordcard.is-sheet{max-height:70dvh;font-size:14px;display:flex;flex-direction:column}
+  .er-modes-panel.is-sheet{max-height:76dvh}
+  .er-note-editor.is-sheet{max-height:80dvh}
+  .er-play-pop.is-sheet{padding:0;overflow:visible;animation:none}
+  .er-play-pop.is-sheet::after{display:none}
+  .er-play-pop.is-sheet .er-play-panel{width:100%;max-height:76dvh;border-radius:var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;border-bottom:0;padding:12px 16px calc(16px + env(safe-area-inset-bottom))}
+  .er-sheet-head{display:flex;align-items:center;gap:12px;margin:-4px 0 4px}
+  .er-sheet-title{flex:1;min-width:0;font-size:16px;font-weight:600;color:var(--er-ink-1)}
+  .er-sheet-close{width:44px;height:44px;flex:none}
+  .er-sheet-handle{display:flex;align-items:center;justify-content:center;height:24px;margin:-4px -16px 2px;touch-action:none;cursor:grab;flex:none}
+  .er-sheet-handle-bar{display:block;width:40px;height:4px;border-radius:999px;background:var(--er-line-strong)}
+  .er-wordcard.is-sheet .er-wordcard-head{position:sticky;top:-8px;z-index:1;background:var(--er-overlay);padding:4px 0;gap:8px}
+  .er-wordcard.is-sheet .er-wordcard-icon{width:var(--er-touch,44px);height:var(--er-touch,44px);justify-content:center}
+  .er-wordcard.is-sheet .er-wordcard-word{font-size:20px}
+  .er-wordcard.is-sheet .er-wordcard-definition{font-size:15px;line-height:1.6}
+  .er-wordcard.is-sheet .er-wordcard-foot .er-btn{min-height:44px;flex:1;justify-content:center}
+  .er-wordcard.is-sheet.is-dragging{transition:none}
+  .er-modes-panel.is-sheet .er-mode-row{min-height:52px;padding:10px 0}
+  .er-modes-panel.is-sheet .er-switch,
+  .er-play-pop.is-sheet .er-switch{width:48px;height:44px}
+  .er-modes-panel.is-sheet .er-switch::after,
+  .er-play-pop.is-sheet .er-switch::after{width:22px;height:22px;margin-top:-11px}
+  .er-note-editor.is-sheet .er-note-editor-close{width:44px;height:44px;justify-content:center}
+  .er-play-panel-head button{min-width:44px;min-height:44px;justify-content:center}
+  .er-play-pop.is-sheet .er-play-segment-item,
+  .er-play-pop.is-sheet .er-play-select{min-height:44px}
+  .er-play-pop.is-sheet .er-play-row{min-height:48px}
+  .er-modal .er-btn{min-height:44px}
+  .er-mm .er-btn,.er-mm-switch-item{min-height:44px}
+  .er-mm-head{flex-wrap:wrap}
+  .er-pod-head .er-select,.er-pod-voice-select,.er-pod-rate-select{min-height:44px}
+  .er-pod-talk-send{min-height:44px;min-width:44px}
+  .er-mode-row input{width:20px;height:20px}
+  .er-cover-listen{width:44px;height:44px}
+  .er-cover-menu{width:44px;height:44px}
+}
+@keyframes er-sheet-in{from{transform:translateY(18px);opacity:0}to{transform:translateY(0);opacity:1}}
+
+/* 浮层的宽变体（思维导图、播客、源文件）在手机上竖着排：两栏 221px 的
+   网格在 390px 的屏上读不了。 */
+@media (max-width: 600px){
+  .er-page .er-pod-body{grid-template-columns:1fr}
+  .er-page .er-pod-list{max-height:none}
+  .er-page .er-pod-head-actions{flex:1 0 100%}
+  .er-page .er-pod-head-actions .er-pod-generate{flex:1;justify-content:center;min-height:44px}
+  .er-page .er-pod-talk-row{flex-wrap:wrap}
+  .er-page .er-pod-talk-input{min-height:44px;font-size:16px}
+  .er-page .er-pod-player{flex-wrap:wrap;gap:8px}
+  .er-page .er-pod-btn{min-width:44px;min-height:44px}
+  .er-page .er-mm-head{gap:8px}
+  .er-page .er-mm-switch-item{min-height:44px;padding:8px 12px}
+  .er-page .er-mm-canvas{max-height:52dvh}
+  .er-page .er-mm-bar{flex-wrap:wrap}
+  .er-page .er-mm-bar-label{max-width:100%}
+  .er-page .er-mm-bar .er-btn{min-height:44px}
+  .er-page .er-source-body{max-height:60dvh}
+  .er-page .er-source-foot .er-btn{min-height:44px}
+}
+
 /* The reduced-motion block: the durations go to zero, so nothing moves. */
 @media (prefers-reduced-motion:reduce){
   .er-page,.er-page *,
   .er-wordcard,.er-wordcard *,
   .er-note-editor,.er-note-editor *,
   .er-modes-panel,.er-modes-panel *,
-  .er-play-panel,.er-play-panel *{
+  .er-play-panel,.er-play-panel *,
+  .er-sheet-handle,.er-sheet-handle *{
     animation-duration:0s!important;
     animation-iteration-count:1!important;
     transition-duration:0s!important;

@@ -170,6 +170,7 @@ export function NotesPanel({ t, bookId, quote, unitIndex, onClose, onJump, onCha
               type: 'button',
               className: 'er-note-delete',
               title: t('notes.delete'),
+              'aria-label': t('notes.delete'),
               onClick: () => { void drop(note.id); },
             },
             h(TrashIcon, { size: 13 }),
@@ -180,7 +181,7 @@ export function NotesPanel({ t, bookId, quote, unitIndex, onClose, onJump, onCha
 
   return h(
     Modal,
-    { title: t('notes.title'), onClose },
+    { title: t('notes.title'), closeLabel: label(t, 'notes.close', '关闭'), onClose },
     h(
       'div',
       { className: 'er-notes' },

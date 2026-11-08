@@ -70,8 +70,57 @@ const METHODS = new Set(['word', 'translate', 'breakdown', 'mindmap', 'podcast',
  * @param {string} message - the Chinese message for the learner.
  * @returns {object} the error body.
  */
-function failure(code, message) {
-  return { ok: false, error: { code, message, details: {} } };
+function failure(code, message, details = {}) {
+  return { ok: false, error: { code, message, details } };
+}
+
+/**
+ * The machine-readable description of a failure, for diagnosis.
+ *
+ * Only codes and status numbers travel here: never a prompt, a body or a
+ * credential. The learner still reads `message`; a developer reads this.
+ * @param {any} error - the thrown failure.
+ * @returns {object} the details.
+ */
+function failureDetails(error) {
+  const details = {};
+  const seen = new Set();
+  let current = error;
+  // The cause chain is where the real reason lives: the reader wraps a
+  // provider failure in a Chinese sentence, and the sentence alone cannot
+  // tell "the key is invalid" from "the model answered garbage".
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (typeof current.code === 'string' && details.code === undefined) details.code = current.code;
+    if (typeof current.status === 'number' && details.status === undefined) details.status = current.status;
+    if (typeof current.providerCode === 'number' && details.providerCode === undefined) details.providerCode = current.providerCode;
+    if (typeof current.name === 'string' && current.name !== 'Error' && details.name === undefined) details.name = current.name;
+    if (typeof current.message === 'string' && current.message !== '' && details.reason === undefined) details.reason = current.message.slice(0, 300);
+    // A failure that names both channels puts the machine-readable half here.
+    if (current.details !== null && current.details !== undefined && typeof current.details === 'object' && details.details === undefined) {
+      details.details = current.details;
+    }
+    current = current.cause;
+  }
+  return details;
+}
+
+/**
+ * The Host services the MiniMax channel reads per request.
+ *
+ * The credential store is the durable home of the key; it is looked up on every
+ * request so a key rotated in the store reaches the next operation without a
+ * restart.
+ *
+ * @param {object} ctx - the Host plugin context.
+ * @returns {{credentials?: object}} the dependencies for `src/host/minimax.js`.
+ */
+function minimaxServices(ctx) {
+  return {
+    get credentials() {
+      return serviceOf(ctx, 'credentials');
+    },
+  };
 }
 
 /**
@@ -348,31 +397,34 @@ export function apply(ctx) {
             const payload = body?.payload ?? {};
             try {
               if (method === 'status') {
-                return Response.json({ ok: true, result: minimax.status() });
+                // The status is the channel's real health: a key that passed the
+                // cheap check, and a channel that is not cooling down. It is
+                // asynchronous because the check is one (cached) MiniMax request.
+                return Response.json({ ok: true, result: await minimax.status(minimaxServices(ctx)) });
               }
               if (method === 'tts') {
                 const audio = await minimax.tts({
                   text: payload?.text,
                   voiceId: payload?.voiceId,
                   speed: payload?.rate,
-                });
+                }, minimaxServices(ctx));
                 return Response.json({ ok: true, result: audio });
               }
               if (method === 'asr') {
                 const result = await minimax.asr({
                   audio: payload?.audio,
                   mimeType: payload?.mimeType,
-                });
+                }, minimaxServices(ctx));
                 return Response.json({ ok: true, result });
               }
               if (method === 'cover') {
-                const cover = await minimax.coverImage({ title: payload?.title });
+                const cover = await minimax.coverImage({ title: payload?.title }, minimaxServices(ctx));
                 return Response.json({ ok: true, result: cover });
               }
               if (method === 'voices') {
                 // 客户端告诉宿主这本书的语种，音色表按它排序：中文书的第一个
                 // 音色必须会读中文，而不是英文。
-                const voices = await minimax.voices({ language: payload?.language });
+                const voices = await minimax.voices({ ...minimaxServices(ctx), language: payload?.language });
                 return Response.json({ ok: true, result: voices });
               }
               if (method === 'shelf') {
@@ -413,6 +465,9 @@ export function apply(ctx) {
                 get agentDefaultModel() {
                   return serviceOf(ctx, 'agentDefaultModel');
                 },
+                get credentials() {
+                  return serviceOf(ctx, 'credentials');
+                },
                 minimax,
               });
               return Response.json({ ok: true, result });
@@ -421,6 +476,7 @@ export function apply(ctx) {
                 failure(
                   'reader/failed',
                   error instanceof Error ? error.message : String(error),
+                  failureDetails(error),
                 ),
                 { status: 200 },
               );

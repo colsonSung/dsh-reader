@@ -739,3 +739,40 @@ test('tts: 云端合成失败时回落到本机合成', async () => {
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(local, ['Fallback please']);
 });
+
+test('asr: 默认 getUserMedia 路径能启动，dispose 会停轨且不再回调', async () => {
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const oldMediaRecorder = Object.getOwnPropertyDescriptor(globalThis, 'MediaRecorder');
+  let trackStopped = false;
+  let stoppedCallback = false;
+  const stream = { getTracks: () => [{ stop: () => { trackStopped = true; } }] };
+  const fakeRecorder = {
+    mimeType: 'audio/webm',
+    start() {},
+    stop() { if (this.onstop) this.onstop(); },
+    ondataavailable: null,
+    onstop: null,
+    onerror: null,
+  };
+  try {
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { mediaDevices: { getUserMedia: async () => stream } },
+    });
+    Object.defineProperty(globalThis, 'MediaRecorder', { configurable: true, value: function () {} });
+    const recorder = createRecorder({
+      mediaRecorderFactory: () => fakeRecorder,
+      onStop: () => { stoppedCallback = true; },
+    });
+    await recorder.start();
+    assert.equal(recorder.isRecording(), true, 'the Promise returned by getUserMedia must not be treated as a function');
+    recorder.dispose();
+    assert.equal(trackStopped, true);
+    assert.equal(stoppedCallback, false);
+  } finally {
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator);
+    else delete globalThis.navigator;
+    if (oldMediaRecorder) Object.defineProperty(globalThis, 'MediaRecorder', oldMediaRecorder);
+    else delete globalThis.MediaRecorder;
+  }
+});
