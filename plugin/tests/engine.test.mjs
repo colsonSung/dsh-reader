@@ -340,20 +340,27 @@ test('tts: setRate clamp 到 [0.5, 2]', () => {
   assert.equal(synth.spoken[0].rate, 1.75);
 });
 
-test('tts: listVoices 只保留英文语音并按 name 排序', () => {
+test('tts: listVoices 只给所选口音的英语音色，其它口音与中文都不上桌', () => {
   const synth = createFakeSynth([
     { voiceURI: 'z', name: 'Zoe', lang: 'en-US' },
     { voiceURI: 'a', name: 'Alice', lang: 'en-GB' },
     { voiceURI: 'f', name: 'Fang', lang: 'zh-CN' },
     { voiceURI: 'b', name: 'Bob', lang: 'EN-au' },
+    { voiceURI: 'i', name: 'Aman', lang: 'en-IN' },
   ]);
+  // American English picks the American voices only: an Australian or Indian
+  // voice is English, but it is not the accent the reader asked for.
   const tts = createTts({ synth });
-  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Alice', 'Bob', 'Zoe']);
+  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Zoe']);
+  tts.setAccent('en-GB');
+  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Alice']);
+  tts.setAccent('en-US');
   tts.setVoice('z');
   assert.equal(tts.getVoice().id, 'z');
   assert.equal(tts.getVoice().name, 'Zoe');
   tts.speak('hello');
   assert.equal(synth.spoken[0].voice.voiceURI, 'z');
+  assert.equal(synth.spoken[0].lang, 'en-US');
 });
 
 test('tts: 缺 boundary 事件时仍有 onWord 回调，且结束时回调最后一个词', async () => {
@@ -634,7 +641,8 @@ test('asr: createRecorder 注入假 MediaRecorder，录音结束后回传 blob �
     onstop: null,
     onerror: null,
     started: false,
-    start() { this.started = true; },
+    startArgs: null,
+    start(...args) { this.started = true; this.startArgs = args; },
     stop() {
       this.stopped = true;
       if (this.ondataavailable) this.ondataavailable({ data: { size: 4, type: 'audio/webm' } });
@@ -651,11 +659,45 @@ test('asr: createRecorder 注入假 MediaRecorder，录音结束后回传 blob �
   await recorder.start();
   assert.equal(recorder.isRecording(), true);
   assert.equal(fakeRecorder.started, true);
+  // A timeslice is what makes the recording readable before it stops; without
+  // it the live dictation has nothing to transcribe while the learner speaks.
+  assert.ok(Number(fakeRecorder.startArgs?.[0]) > 0, 'the recorder collects chunks while it runs');
   recorder.stop();
   assert.equal(recorder.isRecording(), false);
   assert.ok(stopped, '必须回调 onStop');
   assert.equal(stopped.url, 'blob:fake-url');
   assert.ok(stopped.blob);
+});
+
+test('asr: the recorder hands out a snapshot of the audio so far', async () => {
+  const fakeRecorder = {
+    mimeType: 'audio/webm',
+    ondataavailable: null,
+    onstop: null,
+    onerror: null,
+    start() {
+      this.started = true;
+      // one chunk arrives before the snapshot is taken
+      if (this.ondataavailable) this.ondataavailable({ data: new Uint8Array(12) });
+    },
+    stop() {
+      if (this.onstop) this.onstop();
+    },
+  };
+  const recorder = createRecorder({
+    mediaRecorderFactory: () => fakeRecorder,
+    getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }),
+    createObjectURL: () => 'blob:fake-url',
+    onStop: () => {},
+  });
+  assert.equal(recorder.snapshot(), null, 'nothing recorded yet');
+  await recorder.start();
+  const snap = recorder.snapshot();
+  assert.ok(snap, 'the snapshot exists while recording');
+  assert.equal(snap.blob.size, 12);
+  assert.equal(snap.mimeType, 'audio/webm');
+  recorder.dispose();
+  assert.equal(recorder.snapshot(), null, 'a disposed recorder has nothing to hand out');
 });
 
 test('asr: createRecorder 在不支持时 reject 中文错误', async () => {

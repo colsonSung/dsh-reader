@@ -169,7 +169,7 @@ test('status 校验环境变量里的 Key，并返回来源与真实型号', asy
   assert.equal(value.source, 'env');
   assert.equal(value.reason, undefined);
   assert.equal(value.chatModel, 'MiniMax-M3.1-Flash');
-  assert.equal(value.ttsModel, 'speech-02-hd');
+  assert.equal(value.ttsModel, 'speech-2.8-hd');
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/get_voice$/);
   assert.equal(calls[0].init.headers.Authorization, 'Bearer env-key');
@@ -742,4 +742,39 @@ test('冷却只作用于 MiniMax 通道：resetChannel 后 TTS 立刻可用', as
   resetChannel(deps);
   const audio = await tts({ text: 'Hello' }, deps);
   assert.match(audio.url, /^data:audio\/mp3;base64,/);
+});
+
+test('tts 用的模型按代际阶梯下降：新模型不可用就换上一代', async () => {
+  const calls = [];
+  const hex = Buffer.from('audio').toString('hex');
+  const deps = {
+    key: 'k',
+    state: createChannelState(),
+    fetch: routedFetch((url, init) => {
+      if (url.endsWith('/get_voice')) return jsonResponse(VOICES_BODY);
+      const body = JSON.parse(init?.body ?? '{}');
+      if (body.model === 'speech-2.8-hd') {
+        // The account's key cannot use the newest model: the provider answers
+        // "model not available" with its own code.
+        return jsonResponse({ error: { type: 'not_found_error', message: 'The model "speech-2.8-hd" is no longer available. (2069)' } }, 404);
+      }
+      return jsonResponse({ data: { audio: hex }, extra_info: { audio_length: 1200, audio_format: 'mp3' } });
+    }, calls),
+  };
+  const audio = await tts({ text: 'Hello' }, deps);
+  assert.match(audio.url, /^data:audio\/mp3;base64,/);
+  const requested = calls
+    .filter((call) => call.url.endsWith('/t2a_v2'))
+    .map((call) => JSON.parse(call.init.body).model);
+  assert.deepEqual(requested, ['speech-2.8-hd', 'speech-02-hd']);
+  // The default voice is a narrator, not a character voice.
+  const last = calls.filter((call) => call.url.endsWith('/t2a_v2')).at(-1);
+  assert.equal(JSON.parse(last.init.body).voice_setting.voice_id, 'English_expressive_narrator');
+});
+
+test('tts 不会为了换个模型去重试一个坏 Key', async () => {
+  const calls = [];
+  const deps = { key: 'k', state: createChannelState(), fetch: routedFetch(() => jsonResponse({ base_resp: { status_code: 2049, status_msg: 'invalid api key' } }), calls) };
+  await assert.rejects(() => tts({ text: 'Hello' }, deps), (error) => error.code === 'MINIMAX_INVALID_KEY');
+  assert.equal(calls.filter((call) => call.url.endsWith('/t2a_v2')).length, 1);
 });

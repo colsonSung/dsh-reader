@@ -827,7 +827,7 @@ test('status 路由返回真实的通道健康态（无 Key 时为 none）', asy
   assert.equal(body.result.minimax, false);
   assert.equal(body.result.source, 'none');
   assert.equal(body.result.chatModel, 'MiniMax-M3.1-Flash');
-  assert.equal(body.result.ttsModel, 'speech-02-hd');
+  assert.equal(body.result.ttsModel, 'speech-2.8-hd');
   assert.match(body.result.reason, /未配置/);
 });
 

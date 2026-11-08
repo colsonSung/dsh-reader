@@ -17,6 +17,7 @@
 
 import { tokenize } from '../../shared/segment.js';
 import { speechLang, voiceMatchesLanguage } from '../language.js';
+import { accentLang, cloudVoiceAccent, normalizeAccent, pickLocalVoice, rankLocalVoice } from '../voices.js';
 
 /**
  * A silent clip. Playing it inside the click that started the reading unlocks
@@ -95,6 +96,10 @@ export function createTts(options) {
   let voiceInfo = null; // { id, name, lang }
   let cloudVoiceId = null; // 选中的云端音色（不含前缀）
   let language = opts.lang === 'zh' ? 'zh' : 'en'; // 朗读语言：中文书必须用 'zh'
+  // The accent of the reading voice. The machine's default voice is never used
+  // for English: on a Mac whose system voice is not American, that is how a
+  // book ended up read with a Japanese or Indian accent.
+  let accent = normalizeAccent(opts.accent);
   let rate = 1;
   let generation = 0; // 会话令牌：cancel 后旧回调自动失效
   let session = null; // 当前朗读会话
@@ -147,7 +152,10 @@ export function createTts(options) {
         .map((v) => ({
           id: cloudPrefix + v.id,
           name: String(v.name ?? v.id),
-          lang: typeof v.lang === 'string' && v.lang !== '' ? v.lang : 'en-US',
+          // A cloud voice whose language the Host could not tell is not silently
+          // promoted to English: that is how a voice with another mother tongue
+          // got picked to read English.
+          lang: typeof v.lang === 'string' ? v.lang : '',
           cloud: true,
         }))
         .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
@@ -163,8 +171,67 @@ export function createTts(options) {
    */
   function listVoices() {
     const all = allVoices();
+    if (language === 'zh') {
+      const matched = all.filter((v) => voiceMatchesLanguage(v, language));
+      return matched.length > 0 ? matched : all;
+    }
+    // English offers the accent's own voices first — the machine's narrator
+    // voices, in the order the reader wants them — and then the cloud
+    // narrators. Character voices and voices of another accent are not offered.
+    const local = all
+      .filter((v) => v.cloud !== true)
+      .map((v) => ({ voice: v, rank: rankLocalVoice(v, accent) }))
+      .filter((entry) => Number.isFinite(entry.rank))
+      .sort((a, b) => a.rank - b.rank)
+      .map((entry) => entry.voice);
+    const cloud = all.filter((v) => v.cloud === true && cloudVoiceAccent(v.id.slice(cloudPrefix.length)) !== '');
+    if (local.length > 0 || cloud.length > 0) return [...local, ...cloud];
+    // A machine without a voice of this accent still gets a list: the other
+    // accent's narrators are a narrator's English, which beats an empty picker.
+    const other = accent === 'en-GB' ? 'en-US' : 'en-GB';
+    const nearby = all
+      .filter((v) => v.cloud !== true)
+      .map((v) => ({ voice: v, rank: rankLocalVoice(v, other) }))
+      .filter((entry) => Number.isFinite(entry.rank))
+      .sort((a, b) => a.rank - b.rank)
+      .map((entry) => entry.voice);
+    if (nearby.length > 0) return nearby;
     const matched = all.filter((v) => voiceMatchesLanguage(v, language));
     return matched.length > 0 ? matched : all;
+  }
+
+  /**
+   * The local voice that reads the current accent.
+   *
+   * @returns {SpeechSynthesisVoice|null}
+   */
+  function localAccentVoice() {
+    const list = rawVoices();
+    if (list.length === 0) return null;
+    const records = list.map((item) => ({
+      id: item.voiceURI || item.name || '',
+      name: item.name || '',
+      lang: item.lang || '',
+      voice: item,
+    }));
+    const picked = pickLocalVoice(records, accent);
+    return picked === null ? null : picked.voice;
+  }
+
+  /**
+   * 切换朗读口音。
+   *
+   * @param {string} next - 'en-US' or 'en-GB'
+   * @returns {string} the accent in effect
+   */
+  function setAccent(next) {
+    accent = normalizeAccent(next);
+    return accent;
+  }
+
+  /** @returns {string} 当前口音 */
+  function getAccent() {
+    return accent;
   }
 
   /**
@@ -179,7 +246,10 @@ export function createTts(options) {
   function setLanguage(next) {
     language = next === 'zh' ? 'zh' : next === 'en' ? 'en' : language;
     if (voiceInfo !== null && !voiceMatchesLanguage(voiceInfo, language)) {
-      const candidate = allVoices().find((v) => voiceMatchesLanguage(v, language));
+      // The list already answers for the language and the accent: taking a
+      // candidate from it keeps a Chinese book on Chinese voices and an English
+      // book on the accent the learner chose.
+      const candidate = listVoices().find((v) => voiceMatchesLanguage(v, language));
       if (candidate !== undefined) setVoice(candidate.id);
     }
     return language;
@@ -358,15 +428,30 @@ export function createTts(options) {
     }
     const utterance = createUtterance(content);
     utterance.rate = rate;
-    if (voice) {
-      utterance.voice = voice;
+    if (language === 'zh') {
+      if (voice) {
+        utterance.voice = voice;
+      } else {
+        // 没选音色时告诉浏览器要读哪种语言：中文书否则会用默认的英文音色念中文
+        try {
+          utterance.lang = speechLang(language);
+        } catch {
+          // 有些实现不允许改这个字段，忽略
+        }
+      }
     } else {
-      // 没选音色时告诉浏览器要读哪种语言：中文书否则会用默认的英文音色念中文
+      // English always names an accent and a voice: the system's default voice
+      // is whatever the machine was set to, which is how an English sentence
+      // came out with a Japanese or Indian accent.
       try {
-        utterance.lang = speechLang(language);
+        utterance.lang = accentLang(accent);
       } catch {
         // 有些实现不允许改这个字段，忽略
       }
+      const selected = voice !== null && rankLocalVoice({ name: voice.name, lang: voice.lang }, accent) >= 0
+        ? voice
+        : localAccentVoice();
+      if (selected !== null) utterance.voice = selected;
     }
 
     const s = {
@@ -618,6 +703,8 @@ export function createTts(options) {
     getVoice,
     setLanguage,
     getLanguage,
+    setAccent,
+    getAccent,
     setRate,
     getRate,
     speak,

@@ -16,19 +16,20 @@ import, the parsing, the matching UI and the speech recognition.
 
 ## Demo
 
-The recording below is the real plugin, running in the Harness web UI against a
-real shelf: the library, a book open in the reader, the word card answering
-for a tapped word, and the vocabulary list.
+Typing along with the text, then reading the same sentence out loud — the
+verdict is painted on the passage, and the analysis panel opens behind it.
 
-![the Reader, from the library to the word card](docs/demo.gif)
+![typing, then reading aloud, then the analysis](docs/demo.gif)
 
-> The GIF is 40 seconds. The same walk-through is available as
-> [`demo.mp4`](docs/demo.mp4) (1384×900, 775 KB).
+> The GIF is a 14-second excerpt. The full 39-second walk-through is
+> [`demo.mp4`](docs/demo.mp4) (1280×800, 1.2 MB); a still is
+> [`demo-poster.png`](docs/demo-poster.png).
 >
-> The recording and the screenshots below are taken from the running
-> application, not from the preview harness, so they show the plugin as it
-> behaves. The application's own sidebar is collapsed to its icon rail: it
-> lists the reader's own sessions, which are nobody else's business.
+> Every capture in this README is rendered by the plugin itself, from the
+> preview harness that ships in the repository
+> ([`plugin/tests/stage`](plugin/tests/stage)), against a **synthetic demo
+> book**. No real shelf, no personal session, no third-party artwork is
+> involved — the recording is reproducible from the source.
 
 ## What you get
 
@@ -40,8 +41,13 @@ for a tapped word, and the vocabulary list.
 | **Listen** | read the current practice unit aloud with word-level highlighting; adjustable speed (0.5x–2x) and voice. The voice list follows the book's language: an English book gets English voices, a Chinese book gets Chinese ones. The playback range is yours to pick — **paragraph, chapter or the whole book** — with **repeats** (2 / 3 / 5 / 10 / until stopped), a **time limit** (10 / 30 / 60 / 120 minutes) and **auto-play**, which reads whatever you turn to |
 | **Type** | type **in place**, in the paragraph itself — the current word is highlighted, mistakes are marked red, accuracy and speed sit above, and the speech follows what you type, **one word at a time** |
 | **Read aloud** | speech recognition is transcribed and aligned word by word with the original; the verdict is painted **on the passage itself** — a word read right keeps a thin green rule, a misread word gets a red wave (hover it to see what you actually said), a skipped word gets an amber dotted rule. A **pronunciation analysis** panel opens from the paragraph's right gutter: voice, intonation and word match, the suggestions, the word-by-word verdict, the transcript and your own recording. Falls back to a recording you grade yourself |
+| **Local voice first** | the reading voice is a local **Kokoro-82M** model when it is installed — no key, no network, US and UK voices — and the cloud voice (MiniMax `speech-2.8-hd`) only answers when the local one is missing or fails. The bar says which one is talking; `~/.dsh/reader/tts.json` picks the voices |
+| **Live verdict** | in read-aloud the passage is compared with what you say **while you say it**: every 1.9 s the audio so far is transcribed, matched words turn green, misread ones get the red wave. Recording **stops itself** after two seconds of silence, then the final analysis runs |
+| **Auto next** | the `Auto` switch turns reading aloud into a drill: a sentence read at 80% or better advances the page and **starts recording the next one by itself**; a sentence read worse stays where it is |
+| **Zero-click modes** | the three practice modes are a segmented control in the top bar, one click each; the practice unit and the six reading aids live in the panel behind the aids button, and choosing there never closes the panel mid-setup |
+| **Reset the type** | the settings popover has **Reset**, which puts font, size and line height back to the reader's own defaults |
 | **One bar per mode** | the foot of the page holds exactly one control bar, and it follows the mode: the player in listen, the dictation in type, the recorder in read aloud. Each is **a single row** (51–61 px), no stacked panels; what does not fit there lives in the panel behind the paragraph's gutter button |
-| **The practice panel** | the mode strip is three zones separated by hairlines — **mode**, **practice unit** and **reading aid** (full-text translation) — with one selected style, 30 px chips and one keyboard tab stop per chip. It covers nothing: it floats under the top bar, opens on hover or from the top bar's button, and closes as soon as you pick something |
+| **The aids panel** | one button opens a panel with two groups: **practice unit** (sentence / paragraph / cloze) and **reading aids** (word highlight, word-wise gloss, full-text translation, blur, bionic reading, limit look-ups) — six compact toggles with a state dot, the explanation in the tooltip. The bar itself never wraps: the occasional tools (notes, mind map, podcast) sit in one `⋯` menu |
 | **Chinese books** | they read. Chinese sentences end at `。！？`, every character is a word, the punctuation stays on the page instead of vanishing, and the voices and the recogniser follow the language of the book |
 | **Tap a word** | a word card with phonetics, part of speech, definition, examples — and how the word reads in *this* sentence, generated live |
 | **Vocabulary** | star a word to keep it: a drawer with a progress ring (known / learning / to learn), today's additions, search and filters |
@@ -49,23 +55,33 @@ for a tapped word, and the vocabulary list.
 | **Online library** | search Project Gutenberg and import a public-domain book without leaving the app |
 | **Notes** | a note per sentence, kept next to the book in the Host's shelf |
 
-## The library
-
-The shelf: covers, the three read statistics, search, and the per-book menu.
-
-![library](docs/library.png)
-
 ## The reader
 
-One book, opened. The paragraph is the practice surface: the current
-sentence is highlighted, the rest is context, and the word you collected
-earlier keeps its colour.
+One book, opened. The paragraph is the practice surface: the current sentence
+is highlighted, the rest is context, and the words you collected earlier keep
+their colour. The top bar carries the three practice modes as one segmented
+control, the reading aids, the contents, and a menu for the occasional tools.
 
 ![reader](docs/reader.png)
 
-## The vocabulary list
+## Typing along
 
-![vocabulary](docs/vocabulary.png)
+The current word is highlighted in the passage itself, mistakes are marked red,
+and accuracy and speed sit in the bar. The speech follows what you type, one
+word at a time.
+
+![typing along with the text](docs/practice.png)
+
+## Reading aloud
+
+The transcript is aligned word by word with the passage — a word read right
+keeps a thin green rule, a misread word gets a red wave (hover it to see what
+you actually said), a skipped word gets an amber dotted rule. The bar prints the
+short verdict (voice, intonation, word match) and the full analysis panel sits
+one click behind it, with the suggestions, the word-by-word result, the
+transcript and your own recording.
+
+![the verdict on the passage, and the analysis panel](docs/analysis.png)
 
 ## Install
 
@@ -95,6 +111,24 @@ dsh plugin --profile web add ./plugin
 
 After the restart, a **Reader** icon appears in the left sidebar's
 Global panels.
+
+## Optional: the local voice
+
+The reading voice is a local model by default. Nothing ships with the plugin —
+the model is installed once, on your own machine:
+
+```bash
+python3 -m venv --system-site-packages ~/.dsh/reader/tts-venv
+~/.dsh/reader/tts-venv/bin/pip install kokoro soundfile
+```
+
+The first synthesis downloads the weights (Kokoro-82M, ~330 MB, Apache-2.0)
+into the HuggingFace cache; the Host then keeps a small sidecar process
+(`src/host/kokoro-server.py`) warm and reuses it across sentences. Without the
+venv the reader simply uses the cloud voice, and the panel says so.
+
+Voices: `af_heart` / `am_michael` for US English, `bf_emma` / `bm_george` for
+British English; `~/.dsh/reader/tts.json` overrides them.
 
 ## Optional: the AI channel
 

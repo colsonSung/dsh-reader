@@ -7,6 +7,7 @@
  */
 
 import { speakCached } from './tts-cache.js';
+import { accentLang, normalizeAccent, pickLocalVoice } from './voices.js';
 
 /**
  * Play an audio source and wait until it ends.
@@ -42,6 +43,8 @@ export function playAudio(url, options = {}) {
  * @param {string} text - the word.
  * @param {object} [options] - the call options.
  * @param {number} [options.rate] - the speaking rate.
+ * @param {string} [options.accent] - 'en-US' or 'en-GB'; the word is read in it.
+ * @param {SpeechSynthesisVoice[]} [options.voices] - the local voices to pick from.
  * @returns {boolean} true when the word was handed to the browser.
  */
 export function speakLocally(text, options = {}) {
@@ -53,6 +56,29 @@ export function speakLocally(text, options = {}) {
       ? options.utteranceFactory(text)
       : (typeof Ctor === 'function' ? new Ctor(text) : { text });
     utterance.rate = options.rate ?? 1;
+    // A single word is where a wrong accent is most obvious: the word is named
+    // in the requested accent, and read by a voice of that accent.
+    const accent = normalizeAccent(options.accent);
+    try {
+      utterance.lang = accentLang(accent);
+    } catch {
+      // 有些实现不允许改这个字段，忽略
+    }
+    let voices = options.voices;
+    if (!Array.isArray(voices) && typeof synth.getVoices === 'function') {
+      try {
+        voices = synth.getVoices();
+      } catch {
+        voices = [];
+      }
+    }
+    const picked = pickLocalVoice((Array.isArray(voices) ? voices : []).map((item) => ({
+      id: item.voiceURI || item.name || '',
+      name: item.name || '',
+      lang: item.lang || '',
+      voice: item,
+    })), accent);
+    if (picked !== null) utterance.voice = picked.voice;
     synth.speak(utterance);
     return true;
   } catch {

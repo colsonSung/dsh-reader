@@ -255,7 +255,7 @@ test('版本 4 的书库升到 5 时建起 audio 表，旧表与旧数据不动'
 
     // 新表能写、能读、也能删。
     const record = {
-      key: 'au_1', source: 'v|1|t', url: 'data:audio/mp3;base64,AA',
+      key: 'au_1', source: 'v|1|en-US|t', url: 'data:audio/mp3;base64,AA',
       durationMs: 10, createdAt: 1, bytes: 2,
     };
     await localStore.saveAudio(record);
@@ -317,7 +317,7 @@ test('speakCached：第一次去问宿主，第二次直接用缓存', async () 
   const stored = indexed.records('audio');
   assert.equal(stored.length, 1);
   assert.equal(stored[0].key, cache.audioKey({ text: 'Hello there.', voiceId: 'mm:voice', rate: 1 }));
-  assert.equal(stored[0].source, 'mm:voice|1|Hello there.');
+  assert.equal(stored[0].source, 'mm:voice|1|en-US|Hello there.');
   assert.equal(stored[0].url, 'data:audio/mp3;base64,AAAA');
   assert.equal(stored[0].bytes, 'data:audio/mp3;base64,AAAA'.length);
   assert.ok(stored[0].createdAt > 0);
@@ -438,7 +438,7 @@ test('缓存里的片段：来源对不上的旧片段会被重新合成并盖�
   // 表里存着一段来源对不上的片段：键一样，文字却不是这一段。
   indexed.seed('audio', {
     key,
-    source: 'v|1|别的文字',
+    source: 'v|1|en-US|别的文字',
     url: 'data:audio/mp3;base64,OLD',
     durationMs: 1,
     createdAt: 1,
@@ -458,7 +458,7 @@ test('缓存里的片段：来源对不上的旧片段会被重新合成并盖�
   const stored = indexed.records('audio');
   assert.equal(stored.length, 1);
   assert.equal(stored[0].url, 'data:audio/mp3;base64,NEW', '旧的那段要被盖掉');
-  assert.equal(stored[0].source, 'v|1|Same.');
+  assert.equal(stored[0].source, 'v|1|en-US|Same.');
 });
 
 test('表里的片段：重新打开页面也能直接用', async () => {
@@ -468,7 +468,7 @@ test('表里的片段：重新打开页面也能直接用', async () => {
   const url = 'data:audio/mp3;base64,STORED';
   indexed.seed('audio', {
     key,
-    source: 'v|1|From the store.',
+    source: 'v|1|en-US|From the store.',
     url,
     durationMs: 700,
     createdAt: 1,

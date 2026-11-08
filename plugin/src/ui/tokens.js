@@ -18,7 +18,7 @@
  */
 
 export const TOKENS = `
-.er-page,.er-modal,.er-wordcard,.er-note-editor,.er-modes-panel,.er-play-pop,.er-play-panel{
+.er-page,.er-modal,.er-wordcard,.er-note-editor,.er-modes-panel,.er-more-pop,.er-play-pop,.er-play-panel{
   /* ---- 表面层级：画布（沉）→ 卡片（浮）→ 浮层（再浮）。
      第四档不是"更深的灰"，而是一个内嵌槽：输入框、条纹、列表行。 ---- */
   --er-surface-0:color-mix(in oklab,var(--dsw-alias-bg-base) 95%,var(--dsw-alias-label-primary) 5%);

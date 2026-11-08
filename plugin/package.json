@@ -1,6 +1,6 @@
 {
   "name": "@local/reader",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "private": true,
   "type": "module",
   "description": "Import EPUB and plain ebook files, then practise English by typing along with synced speech or reading aloud and matching the transcript.",

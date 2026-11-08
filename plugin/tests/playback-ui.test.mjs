@@ -369,3 +369,24 @@ test('the escape key closes the panel', async (t) => {
   assert.equal(dom.window.document.querySelector('.er-play-panel'), null, 'the panel closes')
   assert.notEqual(trigger.getAttribute('aria-expanded'), 'true')
 })
+
+test('the foot bar offers the accent as a two-chip switch', async (t) => {
+  const { container, root } = await renderReader()
+  t.after(async () => { await unmount(container, root) })
+
+  // The accent sits next to the voice: the two belong together.
+  const group = container.querySelector('.er-read-foot .er-accent')
+  assert.ok(group, 'the foot bar offers an accent')
+  const chips = [...group.querySelectorAll('.er-accent-item')]
+  assert.deepEqual(chips.map((chip) => chip.textContent), ['US', 'UK'])
+  assert.equal(chips[0].getAttribute('aria-pressed'), 'true', 'American English is the default')
+  assert.equal(chips[1].getAttribute('aria-pressed'), 'false')
+
+  await act(async () => {
+    chips[1].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  })
+
+  const after = [...container.querySelectorAll('.er-read-foot .er-accent-item')]
+  assert.equal(after[0].getAttribute('aria-pressed'), 'false')
+  assert.equal(after[1].getAttribute('aria-pressed'), 'true', 'the switch moved to British English')
+})

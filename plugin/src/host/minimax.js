@@ -50,8 +50,18 @@ export const BASE_URL = 'https://api.minimaxi.com/v1';
  */
 export const CHAT_MODEL = 'MiniMax-M3.1-Flash';
 
-/** The speech model used for the reading voice. */
-export const TTS_MODEL = 'speech-02-hd';
+/**
+ * The speech models used for the reading voice, best first.
+ *
+ * `speech-2.8-hd` is the current generation of the provider's speech model; the
+ * voice the reader hears is noticeably more natural than the older one. The
+ * list is a ladder: if the account's key cannot use the newest model, the next
+ * one is tried instead of failing the whole reading.
+ */
+export const TTS_MODELS = ['speech-2.8-hd', 'speech-02-hd'];
+
+/** The speech model the reader hears first. */
+export const TTS_MODEL = TTS_MODELS[0];
 
 /** The speech recognition model. */
 import { convertAudioToWav } from './audio.js';
@@ -776,23 +786,39 @@ export async function tts({ text, voiceId, speed = 1 }, deps = {}) {
   const content = typeof text === 'string' ? text.trim() : '';
   if (content === '') throw channelError('没有要朗读的内容', { code: 'EMPTY_TEXT' });
   const rate = Math.min(2, Math.max(0.5, Number(speed) || 1));
-  const payload = await perform('/t2a_v2', {
-    model: deps.model ?? TTS_MODEL,
-    text: content,
-    stream: false,
-    voice_setting: {
-      voice_id: voiceId ?? 'English_Graceful_Lady',
-      speed: rate,
-      vol: 1,
-      pitch: 0,
-    },
-    audio_setting: {
-      sample_rate: 32000,
-      bitrate: 128000,
-      format: 'mp3',
-      channel: 1,
-    },
-  }, deps);
+  const models = deps.model === undefined ? TTS_MODELS : [deps.model];
+  let payload = null;
+  let lastError = null;
+  for (const model of models) {
+    try {
+      payload = await perform('/t2a_v2', {
+        model,
+        text: content,
+        stream: false,
+        voice_setting: {
+          // The narrator voice the provider documents for reading, not a
+          // character voice: this is a book, not a radio play.
+          voice_id: voiceId ?? 'English_expressive_narrator',
+          speed: rate,
+          vol: 1,
+          pitch: 0,
+        },
+        audio_setting: {
+          sample_rate: 32000,
+          bitrate: 128000,
+          format: 'mp3',
+          channel: 1,
+        },
+      }, deps);
+      break;
+    } catch (error) {
+      lastError = error;
+      // Only "this model is not available" moves down the ladder; a bad key or
+      // an empty balance would fail the same way on every model.
+      if (error?.code !== 'MINIMAX_MODEL_UNAVAILABLE') throw error;
+    }
+  }
+  if (payload === null) throw lastError ?? channelError('MiniMax 没有返回音频', { code: 'EMPTY_AUDIO' });
   const hex = payload?.data?.audio;
   if (typeof hex !== 'string' || hex === '') {
     throw channelError('MiniMax 没有返回音频', { code: 'EMPTY_AUDIO' });

@@ -65,14 +65,17 @@ function hashOf(value) {
  * It travels with the record, so a key that was made for another text can
  * never serve the wrong audio.
  *
- * @param {{ text?: string, voiceId?: string, rate?: number }} input
+ * @param {{ text?: string, voiceId?: string, rate?: number, accent?: string }} input
  * @returns {string} the source.
  */
-function audioSource({ text, voiceId, rate } = {}) {
+function audioSource({ text, voiceId, rate, accent } = {}) {
   const voice = voiceId === undefined || voiceId === null ? '' : String(voiceId);
   const speed = rate === undefined || rate === null ? '' : String(rate);
+  // The accent belongs in the key: when no voice is named, the accent is the
+  // only thing that decides what the audio says.
+  const tone = accent === 'en-GB' ? 'en-GB' : 'en-US';
   const words = text === undefined || text === null ? '' : String(text);
-  return `${voice}|${speed}|${words}`;
+  return `${voice}|${speed}|${tone}|${words}`;
 }
 
 /**
@@ -218,11 +221,11 @@ async function evictIfNeeded(keepKey, options) {
  * record and is checked on the way out, so a collision cannot serve the wrong
  * audio.
  *
- * @param {{ text: string, voiceId?: string, rate?: number }} input
+ * @param {{ text: string, voiceId?: string, rate?: number, accent?: string }} input
  * @returns {string} the key
  */
-export function audioKey({ text, voiceId, rate } = {}) {
-  return `au_${hashOf(audioSource({ text, voiceId, rate }))}`;
+export function audioKey({ text, voiceId, rate, accent } = {}) {
+  return `au_${hashOf(audioSource({ text, voiceId, rate, accent }))}`;
 }
 
 /**
@@ -293,7 +296,7 @@ async function makeClip(text, context, options) {
 
   // Then the Host: this clip is made once and only once.
   if (typeof ask !== 'function') throw new Error('当前环境没有语音合成通道');
-  const result = await ask({ text, voiceId: context.voiceId, rate: context.rate });
+  const result = await ask({ text, voiceId: context.voiceId, rate: context.rate, accent: context.accent });
   const url = typeof result?.url === 'string' ? result.url : '';
   if (url === '') throw new Error('云端没有返回音频');
   const durationMs = Number(result?.durationMs);

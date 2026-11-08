@@ -433,6 +433,10 @@ export const STYLE = `${TOKENS}
    player floats at the foot, so the frame stops above it; in a practice mode
    the dock below is in the flow, so the frame ends right above it. */
 .er-reader.is-immersive .er-read-main{position:relative;flex:1;min-height:0;padding:72px 0 100px;gap:0}
+/* The 100px foot reserved room for the floating mode dock. Listening has no
+   dock (the player is the bar), so the sheet runs down to the player instead of
+   leaving a band of empty paper above it. */
+.er-reader.is-immersive.is-mode-listen .er-read-main{padding-bottom:72px}
 .er-reader.is-immersive.is-mode-type .er-read-main,
 .er-reader.is-immersive.is-mode-speak .er-read-main{padding-bottom:0}
 /* The paper uses the full frame width here: the tool rail no longer takes a
@@ -440,10 +444,8 @@ export const STYLE = `${TOKENS}
 .er-reader.is-immersive .er-read-body{width:100%;max-width:100%;margin:0 auto;padding:0 24px}
 .er-reader.is-immersive .er-reading-page{margin:0 auto;padding-top:18px;max-width:min(100%,max(calc(var(--er-column-width,68ch) + 75px),68cqw))}
 .er-reader.is-immersive .er-page-note{display:none}
-.er-tools-magnet{position:absolute;right:0;top:50%;transform:translateY(-50%);z-index:7;width:72px;pointer-events:none}
-.er-tools-tab{position:absolute;right:0;top:50%;transform:translateY(-50%);width:20px;height:64px;display:flex;align-items:center;justify-content:center;border:1px solid var(--er-line);border-right:0;border-radius:12px 0 0 12px;background:var(--er-surface-1);color:var(--er-ink-3);font-size:16px;pointer-events:auto;cursor:pointer}
-.er-reader.is-immersive .er-read-tools{position:relative;right:auto;top:auto;transform:translateX(100%);z-index:auto;align-self:auto;opacity:0;pointer-events:none;transition:transform var(--er-dur-state) var(--er-ease),opacity var(--er-dur-hover) ease;background:color-mix(in srgb,var(--er-surface-1) 88%,transparent);backdrop-filter:blur(12px)}
-.er-tools-magnet.is-open .er-read-tools{transform:translateX(0);opacity:1;pointer-events:auto}
+/* The desktop tools rail is gone: its actions moved into the top bar. The
+   phone keeps its bottom bar, which is the only room it has. */
 .er-reader.is-immersive .er-read-tool{width:54px}
 .er-reader.is-immersive .er-read-tool-label{font-size:11px}
 /* The mode strip floats above the player, at the left foot of the page. */
@@ -544,6 +546,13 @@ export const STYLE = `${TOKENS}
 .er-play-status-dot{width:7px;height:7px;border-radius:50%;background:var(--er-accent);animation:er-play-pulse 1.6s ease-in-out infinite}
 .er-play-status-dot.is-paused{animation:none;opacity:.45}
 .er-play-status-count{color:var(--er-ink-3);font-variant-numeric:tabular-nums}
+/* The accent switch: two chips in one track, the selected one filled. */
+.er-accent{display:inline-flex;align-items:center;gap:2px;padding:2px;border-radius:999px;background:var(--er-surface-3);flex:none}
+.er-accent-item{appearance:none;border:0;border-radius:999px;padding:3px 8px;background:transparent;color:var(--er-ink-2);font:inherit;font-size:11px;line-height:1.2;cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
+.er-accent-item:hover{color:var(--er-ink-1)}
+.er-accent-item[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink);font-weight:500}
+.er-accent-item:focus-visible{outline:var(--er-focus);outline-offset:1px}
+.er-play-note{margin:2px 0 0;font-size:11.5px;line-height:1.5;color:var(--er-ink-3);max-width:420px}
 .er-play-status-pause{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;margin-left:2px;border:0;border-radius:50%;background:var(--er-accent-soft);color:var(--er-accent);cursor:pointer}
 .er-play-status-pause:hover{background:var(--er-hover)}
 .er-play-status-pause:focus-visible{outline:var(--er-focus);outline-offset:1px}
@@ -556,7 +565,7 @@ export const STYLE = `${TOKENS}
 .er-typography-pop input[type="range"]{accent-color:var(--er-accent);min-width:0;flex:1}
 .er-reader.is-immersive .er-paragraph-row{position:relative}
 .er-reader.is-immersive .er-paragraph-main{padding-right:36px}
-.er-reader.is-immersive .er-paragraph-actions{position:absolute;right:0;top:0;flex-direction:column;align-items:flex-end;gap:4px}
+.er-reader.is-immersive .er-paragraph-actions{position:absolute;right:0;top:0;flex-direction:column;align-items:flex-end;gap:4px;z-index:4}
 
 /* Scrollbars never become a second strip of chrome. Scrolling still works
    with the wheel, a trackpad, touch and the keyboard; only the bar is hidden. */
@@ -590,6 +599,7 @@ export const STYLE = `${TOKENS}
 .er-speak-actions{display:flex;align-items:center;gap:6px;flex:none}
 .er-speak-bar .er-btn-primary{padding:8px 14px}
 .er-paragraph-action.is-analysis{color:var(--er-accent)}
+.er-paragraph-action.is-mode{color:var(--er-accent-ink);background:var(--er-accent-soft)}
 .er-analysis{display:flex;flex-direction:column;gap:14px}
 .er-analysis-heard{display:flex;flex-direction:column;gap:6px}
 .er-analysis-text{margin:0;padding:10px 12px;border-radius:var(--dsw-radius-sm);background:var(--er-surface-2);border:1px solid var(--er-line);font-size:13px;line-height:1.6;color:var(--er-ink-1);white-space:pre-wrap}
@@ -702,8 +712,14 @@ export const STYLE = `${TOKENS}
    hovered (or the button itself is focused). A touch screen has no hover,
    so there they stay where they are. */
 @media (hover: hover){
-  .er-paragraph-action{opacity:0}
-  .er-paragraph-row:hover .er-paragraph-action,.er-paragraph-action:focus-visible{opacity:1}
+  /* A hidden button must also be un-hittable: the gutter of a short paragraph
+     is taller than its row, so its own invisible buttons of the next paragraph
+     used to sit on top of the ones the learner was reaching for and stole the
+     hover. */
+  .er-paragraph-action{opacity:0;pointer-events:none}
+  .er-paragraph-actions{pointer-events:none}
+  .er-paragraph-row.is-tools .er-paragraph-action,.er-paragraph-action:focus-visible{opacity:1;pointer-events:auto}
+  .er-paragraph-row.is-tools .er-paragraph-actions{pointer-events:auto}
 }
 .er-paragraph-action:hover{background:var(--er-hover);color:var(--er-ink-1)}
 .er-paragraph-action:focus-visible{outline:var(--er-focus);outline-offset:1px}
@@ -739,9 +755,19 @@ export const STYLE = `${TOKENS}
    container. */
 .er-mode-actions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0 0 10px;padding-bottom:10px;border-bottom:1px solid var(--er-line)}
 .er-mode-actions .er-mode{justify-content:center;min-width:0;padding:7px 6px}
-.er-modes-panel{position:fixed;z-index:1200;box-sizing:border-box;max-height:min(62vh,440px);overflow:auto;padding:12px 16px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float)}
+.er-modes-panel{position:fixed;z-index:1200;box-sizing:border-box;max-height:min(74vh,600px);overflow:auto;padding:12px 16px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float)}
 .er-mode-row{display:flex;align-items:center;gap:12px;padding:8px 0;cursor:pointer}
 .er-mode-row+.er-mode-row{border-top:1px solid var(--er-line)}
+/* The practice unit is a choice, not a switch: three chips on the right of the
+   row, so the panel reads "what, how much, which aids" from top to bottom. */
+.er-mode-row.is-choice{align-items:center;gap:10px;flex-wrap:wrap;cursor:default}
+.er-mode-row.is-choice .er-mode-row-label{white-space:nowrap}
+.er-mode-row.is-choice .er-scope{margin-left:auto}
+.er-mode-row.is-choice+.er-mode-row{border-top:1px solid var(--er-line)}
+/* Reset and All settings sit side by side in the same footer row. */
+.er-typography-pop .er-setting-row:last-child{justify-content:space-between;gap:8px}
+.er-setting-reset{flex:none;padding:0 10px;height:28px;font-size:12px}
+
 .er-mode-row-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .er-mode-row-label{font-size:13px;color:var(--er-ink-1)}
 .er-mode-row-hint{font-size:12px;line-height:1.4;color:var(--er-ink-3)}
@@ -1309,5 +1335,86 @@ export const STYLE = `${TOKENS}
     scroll-behavior:auto!important;
   }
 }
+
+/* The compact read-aloud verdict: three dimensions and one suggestion, above
+   the bar. It is the same data as the panel, only readable at a glance. */
+.er-speak-summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%;box-sizing:border-box;padding:7px 12px;border:1px solid var(--er-line);border-radius:var(--dsw-radius-lg);background:var(--er-surface-1);color:var(--er-ink-2);font:inherit;font-size:12px;text-align:left;cursor:pointer;transition:background-color var(--er-dur-hover) ease}
+.er-speak-summary:hover{background:var(--er-hover)}
+.er-speak-summary-item{display:inline-flex;align-items:baseline;gap:5px;flex:none}
+.er-speak-summary-label{color:var(--er-ink-3);font-size:11px}
+.er-speak-summary-value{font-size:12px}
+.er-speak-summary-item.is-good .er-speak-summary-value{color:var(--er-ok-ink)}
+.er-speak-summary-item.is-warn .er-speak-summary-value{color:var(--er-warn-ink)}
+.er-speak-summary-item.is-bad .er-speak-summary-value{color:var(--er-warn-ink)}
+.er-speak-summary-item.is-live .er-speak-summary-value{color:var(--er-accent-ink)}
+.er-speak-summary-tip{min-width:0;flex:1 1 120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--er-ink-3)}
+.er-speak-summary-more{flex:none;color:var(--er-ink-3)}
+
+/* The modes panel is a decision, not a settings screen: two segmented rows for
+   the practice (mode, then unit) and a grid of compact aid toggles under them. */
+.er-modes-group{display:flex;flex-direction:column;gap:8px;padding:10px 0}
+.er-modes-group+.er-modes-group{border-top:1px solid var(--er-line)}
+.er-modes-group-label{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--er-ink-3)}
+.er-segment{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px;border-radius:10px;background:var(--er-surface-2);border:1px solid var(--er-line)}
+.er-segment.is-quiet{background:transparent;border-color:transparent;padding:0;margin-top:2px}
+.er-segment-item{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:30px;padding:0 6px;border:0;border-radius:7px;background:transparent;font:inherit;font-size:12.5px;color:var(--er-ink-2);cursor:pointer;transition:background-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
+.er-segment-item:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-segment-item[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink);font-weight:600}
+.er-segment.is-quiet .er-segment-item[aria-pressed="true"]{background:var(--er-surface-2);font-weight:500}
+.er-segment-item:disabled{opacity:.4;cursor:default}
+.er-segment-text{white-space:nowrap}
+.er-aid-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.er-aid-chip{display:flex;align-items:center;gap:7px;height:30px;padding:0 9px;border:1px solid var(--er-line);border-radius:8px;background:transparent;font:inherit;font-size:12px;color:var(--er-ink-2);cursor:pointer;text-align:left;transition:background-color var(--er-dur-hover) ease,border-color var(--er-dur-hover) ease,color var(--er-dur-hover) ease}
+.er-aid-chip:hover{background:var(--er-hover)}
+.er-aid-chip[aria-pressed="true"]{border-color:color-mix(in srgb,var(--er-accent) 55%,var(--er-line));background:var(--er-accent-soft);color:var(--er-accent-ink)}
+.er-aid-dot{flex:none;width:6px;height:6px;border-radius:50%;background:var(--er-ink-3);opacity:.35}
+.er-aid-chip[aria-pressed="true"] .er-aid-dot{background:var(--er-accent);opacity:1}
+.er-aid-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+
+/* The read-aloud bar: one standalone button on the left, the how-to behind an
+   info icon, and only real state in the middle. */
+.er-speak-bar{display:flex;align-items:center;gap:10px}
+.er-speak-primary{flex:none;display:flex;align-items:center}
+.er-speak-start{height:36px;padding:0 18px;border-radius:999px;gap:8px;font-weight:600;box-shadow:0 2px 6px color-mix(in srgb,var(--er-accent) 28%,transparent)}
+.er-speak-start:hover{transform:translateY(-1px)}
+.er-speak-info{flex:none;color:var(--er-ink-3)}
+.er-speak-info:hover{color:var(--er-ink-1)}
+.er-speak-bar .er-speak-line{flex:1 1 auto;justify-content:center;min-width:0}
+.er-speak-bar .er-speak-status-text:empty{display:none}
+@media (max-width: 560px){
+  .er-speak-start{padding:0 12px}
+}
+
+
+/* The auto-next switch reads as "on" when the drill will continue by itself. */
+.er-speak-auto[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink);border-color:color-mix(in srgb,var(--er-accent) 45%,transparent)}
+.er-speak-auto[aria-pressed="true"]:hover{background:var(--er-accent-hover);color:var(--er-accent-ink)}
+
+
+/* The drill switch is a small pill: its state matters, so it says its name. */
+.er-speak-bar .er-speak-auto{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border-radius:999px;border:1px solid var(--er-line);background:transparent;color:var(--er-ink-2);font-size:12px;flex:none}
+.er-speak-bar .er-speak-auto:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-speak-bar .er-speak-auto[aria-pressed="true"]{border-color:color-mix(in srgb,var(--er-accent) 45%,transparent);background:var(--er-accent-soft);color:var(--er-accent-ink)}
+.er-speak-auto-label{white-space:nowrap}
+
+
+/* The bar: one segmented control for the practice mode, then single tools, then
+   one menu. Nothing in it is allowed to wrap into a second line. */
+.er-read-actions{flex-wrap:nowrap;gap:4px}
+.er-mode-segment{display:inline-flex;align-items:center;gap:2px;padding:2px;margin-right:4px;border-radius:999px;background:var(--er-surface-2);border:1px solid var(--er-line);flex:none}
+.er-mode-segment .er-mode-button{width:28px;height:28px;border-radius:999px}
+.er-mode-segment .er-mode-button[aria-pressed="true"]{background:var(--er-accent-soft);color:var(--er-accent-ink)}
+.er-mode-segment .er-mode-button[aria-pressed="true"]:hover{background:var(--er-accent-hover)}
+.er-more-pop{position:fixed;z-index:1300;box-sizing:border-box;padding:6px;border-radius:var(--dsw-radius-lg);background:var(--er-overlay);border:1px solid var(--er-line);box-shadow:var(--er-shadow-float);display:flex;flex-direction:column;gap:2px}
+.er-more-row{display:flex;align-items:center;gap:10px;height:34px;padding:0 10px;border:0;border-radius:8px;background:transparent;font:inherit;font-size:12.5px;color:var(--er-ink-2);cursor:pointer;text-align:left}
+.er-more-row:hover{background:var(--er-hover);color:var(--er-ink-1)}
+.er-more-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.er-more-badge{flex:none;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--er-accent);color:var(--er-on-semantic);font-size:11px;line-height:18px;text-align:center}
+
+
+/* A floating panel is portalled into the body; this scope carries the reader's
+   own tokens so the panel's surface is not transparent. */
+.er-float-scope{position:static;display:contents}
 
 `;

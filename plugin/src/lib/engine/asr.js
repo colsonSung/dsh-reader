@@ -10,6 +10,8 @@
  * @param {any} [cause] - the underlying reason.
  * @returns {Error} the same error.
  */
+import { createSilenceWatcher } from '../speech-vad.js';
+
 function withCode(error, code, cause) {
   error.code = code;
   if (cause !== undefined) error.cause = cause;
@@ -235,6 +237,9 @@ export function createRecognizer(options) {
  *           createObjectURL?: (blob: Blob) => string }} [options]
  * @returns {{ start(): Promise<void>, stop(): void, isRecording(): boolean }}
  */
+/** How often the MediaRecorder hands out a chunk, in milliseconds. */
+export const RECORDING_TIMESLICE_MS = 700;
+
 export function createRecorder(options) {
   const opts = options && typeof options === 'object' ? options : {};
   const onStop = typeof opts.onStop === 'function' ? opts.onStop : null;
@@ -248,6 +253,10 @@ export function createRecorder(options) {
   let recorder = null;
   let stream = null;
   let chunks = [];
+  let analyser = null;
+  let audioContext = null;
+  let silenceTimer = null;
+  let watcher = null;
   let recording = false;
   let disposed = false;
   let objectUrl = '';
@@ -324,6 +333,7 @@ export function createRecorder(options) {
       if (data && (typeof data.size !== 'number' || data.size > 0)) chunks.push(data);
     };
     recorder.onstop = () => {
+      releaseWatcher();
       const mimeType = (recorder && recorder.mimeType) || 'audio/webm';
       const BlobCtor = readGlobal('Blob');
       let blob;
@@ -332,7 +342,14 @@ export function createRecorder(options) {
       } catch {
         blob = { type: mimeType, size: 0 };
       }
-      const url = (injectedCreateObjectURL || defaultCreateObjectURL)(blob);
+      // A playback URL is a convenience: a browser (or a test DOM) that refuses
+      // to make one must not cost the transcription, which needs the blob only.
+      let url = '';
+      try {
+        url = (injectedCreateObjectURL || defaultCreateObjectURL)(blob);
+      } catch {
+        url = '';
+      }
       objectUrl = url;
       recording = false;
       releaseStream();
@@ -348,14 +365,18 @@ export function createRecorder(options) {
       if (onStop) onStop(blob, url);
     };
     recorder.onerror = (event) => {
+      releaseWatcher();
       recording = false;
       releaseStream();
       const reason = event?.error?.message || event?.message || 'recording failed';
       if (!disposed && onError) onError(withCode(new Error('recording failed'), 'RECORD_FAILED', reason));
     };
 
+    // A timeslice is what makes the recording readable before it stops: without
+    // it the MediaRecorder delivers one blob at the very end, so the live
+    // dictation would have nothing to transcribe while the learner speaks.
     try {
-      recorder.start();
+      recorder.start(RECORDING_TIMESLICE_MS);
     } catch (err) {
       recording = false;
       releaseStream();
@@ -363,6 +384,77 @@ export function createRecorder(options) {
       throw new Error(`录音启动失败：${reason}`);
     }
     recording = true;
+    startEndOfSpeechWatcher();
+  }
+
+  /**
+   * Watch the microphone level so the reading can close itself.
+   *
+   * Without an AudioContext (headless, older engines) nothing happens: the
+   * learner still stops the recording by hand.
+   */
+  function startEndOfSpeechWatcher() {
+    if (typeof opts.onEndOfSpeech !== 'function') return;
+    const AudioCtor = readGlobal('AudioContext') || readGlobal('webkitAudioContext');
+    if (typeof AudioCtor !== 'function' || stream === null) return;
+    try {
+      audioContext = new AudioCtor();
+      const source = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      const samples = new Float32Array(analyser.fftSize);
+      watcher = createSilenceWatcher({
+        onEnd: () => {
+          if (disposed || !recording) return;
+          opts.onEndOfSpeech();
+        },
+      });
+      silenceTimer = setInterval(() => {
+        if (analyser === null || disposed) return;
+        try {
+          analyser.getFloatTimeDomainData(samples);
+          let sum = 0;
+          for (let index = 0; index < samples.length; index += 1) sum += samples[index] * samples[index];
+          watcher?.feed(Math.sqrt(sum / samples.length), Date.now());
+        } catch {
+          /* a level that cannot be read is not a reason to stop the recording */
+        }
+      }, 120);
+      audioContext.resume?.().catch?.(() => {});
+    } catch {
+      releaseWatcher();
+    }
+  }
+
+  /** Stop the level watcher and release the audio graph. */
+  function releaseWatcher() {
+    if (silenceTimer !== null) {
+      clearInterval(silenceTimer);
+      silenceTimer = null;
+    }
+    watcher = null;
+    analyser = null;
+    if (audioContext !== null) {
+      try { audioContext.close?.(); } catch { /* already closed */ }
+      audioContext = null;
+    }
+  }
+
+  /**
+   * The audio captured so far, without stopping.
+   *
+   * The live dictation re-transcribes this every couple of seconds; a snapshot
+   * of the chunks is enough, and it must not disturb the recorder.
+   *
+   * @returns {{blob: Blob, mimeType: string}|null} the clip so far.
+   */
+  function snapshot() {
+    if (!recording || chunks.length === 0) return null;
+    const BlobCtor = readGlobal('Blob');
+    if (typeof BlobCtor !== 'function') return null;
+    const mimeType = (recorder && recorder.mimeType) || 'audio/webm';
+    return { blob: new BlobCtor(chunks, { type: mimeType }), mimeType };
   }
 
   /** 停止录音，触发 onStop。 */
@@ -380,6 +472,7 @@ export function createRecorder(options) {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    releaseWatcher();
     recording = false;
     if (recorder) {
       try { recorder.stop(); } catch { /* already stopped */ }
@@ -396,5 +489,5 @@ export function createRecorder(options) {
     return recording;
   }
 
-  return { start, stop, dispose, isRecording };
+  return { start, stop, dispose, isRecording, snapshot };
 }

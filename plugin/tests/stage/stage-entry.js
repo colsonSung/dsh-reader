@@ -24,6 +24,8 @@ import { apply } from '../../src/client-entry.js';
 import { ReaderView } from '../../src/ui/reader.js';
 import { STYLE } from '../../src/ui/styles.js';
 
+const params = new URLSearchParams(window.location.search);
+
 /* ------------------------------------------------------------------ errors */
 
 /** Everything that went wrong, so a broken render is visible instead of blank. */
@@ -140,6 +142,22 @@ const PARAGRAPHS = [
   ],
 ];
 
+/**
+ * A book of long paragraphs, like the one the blank band was reported on: a
+ * page that can only hold one of them leaves the paper half empty.
+ */
+const LONG_PARAGRAPHS = [
+  Array.from({ length: 2 }, (_, i) => 'Never fear, we are going to clear up the confusion, line ' + (i + 1) + '.'),
+  Array.from({ length: 2 }, (_, i) => 'How do investors understand go-to-market? Line ' + (i + 1) + ', short on purpose.'),
+  Array.from({ length: 15 }, (_, i) => 'Kelly Ford from the growth equity firm explained the role of investors in this process, line ' + (i + 1) + ', and this paragraph is far taller than the paper.'),
+];
+
+
+if (params.get('long') === '1') {
+  PARAGRAPHS.length = 0;
+  PARAGRAPHS.push(...LONG_PARAGRAPHS.map((paragraph) => paragraph.map((line, index) => line + ' (sentence ' + (index + 1) + ')')));
+}
+
 /** Every sentence of the fixture book, in reading order. */
 const units = [];
 let unitId = 0;
@@ -167,7 +185,6 @@ const book = {
 
 /* ------------------------------------------------------------------- mount */
 
-const params = new URLSearchParams(window.location.search);
 
 // Headless Chrome freezes CSS transitions under a virtual time budget, so a
 // screenshot can paint the state before the last click. The stage can drop
@@ -205,6 +222,13 @@ const MODE_LABELS = {
 function pressMode(mode) {
   if (mode === 'listen') return true;
   const label = t(MODE_LABELS[mode]);
+  // The desktop bar carries one button per mode; the phone still has the strip.
+  const barButtons = Array.from(document.querySelectorAll('.er-mode-button'));
+  const byTitle = barButtons.find((button) => (button.getAttribute('title') ?? '').trim() === label);
+  if (byTitle !== undefined) {
+    byTitle.click();
+    return true;
+  }
   const chips = Array.from(document.querySelectorAll('.er-mode-chips .er-mode'));
   const target = chips.find((chip) => (chip.textContent ?? '').trim() === label)
     ?? chips.find((chip) => (chip.textContent ?? '').includes(label))
@@ -331,6 +355,9 @@ function labelOf(element) {
  * Build the probe the runner reads back.
  * @returns {object}
  */
+/** Extra measurements the interaction steps add before the probe is written. */
+const probeExtras = {};
+
 function buildProbe() {
   const selectors = [
     '.er-read-foot',
@@ -502,6 +529,22 @@ function buildProbe() {
     coverageNote: '正文是否被控件压住以 readBodyCovered 为准；paperCovered 只统计 .er-reading-page 的几何矩形（被滚动容器 overflow 裁切），修好之后仍可能为 true，仅作参考；textCovered 用段落文本块裁切后的交叠面积做更严格的交叉验证。',
     // The paper is the frame; the text window inside it is what scrolls.
     paragraphs: document.querySelectorAll('.er-page-paragraph').length,
+    // How much of the sheet the text actually fills: the fitter grows a page
+    // until this bottom edge reaches the window, so the gap is the thing to
+    // watch when a page looks half empty.
+    pageFit: (() => {
+      const scroll = document.querySelector('.er-reading-scroll');
+      if (scroll === null) return null;
+      const blocks = [...document.querySelectorAll('.er-page-paragraph')];
+      const last = blocks[blocks.length - 1];
+      const box = scroll.getBoundingClientRect();
+      const lastBox = last === undefined ? null : last.getBoundingClientRect();
+      return {
+        gap: Math.round(box.bottom - (lastBox === null ? box.top : lastBox.bottom)),
+        textBottom: lastBox === null ? null : Math.round(lastBox.bottom),
+        windowBottom: Math.round(box.bottom),
+      };
+    })(),
     readingScroll: (() => {
       const scroll = document.querySelector('.er-reading-scroll');
       if (scroll === null) return null;
@@ -540,6 +583,42 @@ function buildProbe() {
     }),
     dockText: dock === null ? '' : labelOf(dock).slice(0, 300),
     modeDockVisible: isVisible(dock),
+    readerTree: (() => {
+      const root = document.querySelector('.er-reader') || document.querySelector('.er-page');
+      if (root === null) return null;
+      const rows = [];
+      const walk = (el, depth) => {
+        if (depth > 3) return;
+        rows.push({ depth, cls: String(el.className).slice(0, 50), top: Math.round(el.getBoundingClientRect().top), h: Math.round(el.getBoundingClientRect().height) });
+        for (const child of el.children) walk(child, depth + 1);
+      };
+      walk(root, 0);
+      return rows;
+    })(),
+    gapChildren: (() => {
+      const body = document.querySelector('.er-read-body');
+      if (body === null) return null;
+      const parent = body.parentElement;
+      if (parent === null) return null;
+      return [...parent.children].map((child) => ({
+        cls: child.className.slice(0, 60),
+        top: Math.round(child.getBoundingClientRect().top),
+        height: Math.round(child.getBoundingClientRect().height),
+        mt: getComputedStyle(child).marginTop,
+        mb: getComputedStyle(child).marginBottom,
+      }));
+    })(),
+    layoutGap: (() => {
+      const body = document.querySelector('.er-read-body');
+      const foot = document.querySelector('.er-read-foot');
+      const dock = document.querySelector('.er-mode-dock');
+      if (body === null || foot === null) return null;
+      const bodyBox = body.getBoundingClientRect();
+      const footBox = foot.getBoundingClientRect();
+      const dockBox = dock === null ? null : dock.getBoundingClientRect();
+      return { bodyBottom: Math.round(bodyBox.bottom), footTop: Math.round(footBox.top), gap: Math.round(footBox.top - bodyBox.bottom), dockHeight: dockBox === null ? null : Math.round(dockBox.height) };
+    })(),
+    ...probeExtras,
     consoleErrors,
   };
 }
@@ -620,6 +699,20 @@ async function main() {
       strip.style.transition = 'none';
       strip.style.opacity = '1';
       strip.style.visibility = 'visible';
+    }
+  }
+  // The reading-aids panel is opened from the top bar; the stage can click it
+  // so a screenshot shows where the panel actually lands.
+  if (params.get('aids') === '1') {
+    const aids = document.querySelector('.er-aids-button');
+    if (aids === null) consoleErrors.push('aids button not found');
+    else aids.click();
+    await settle();
+    const panel = document.querySelector('.er-modes-panel');
+    if (panel !== null) {
+      panel.style.transition = 'none';
+      const box = panel.getBoundingClientRect();
+      probeExtras.aidsPanel = { left: Math.round(box.left), top: Math.round(box.top), width: Math.round(box.width) };
     }
   }
   writeProbe(buildProbe());

@@ -97,9 +97,25 @@ async function typeWord(field, word) {
  * @param {Element} container - the rendered reader
  */
 async function switchToType(container) {
-  const modeButton = [...container.querySelectorAll('button')].find((button) => button.textContent === 'reader.modeType')
-  assert.ok(modeButton, 'the typing mode button must exist')
-  await act(async () => { modeButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await switchToMode(container, 'reader.modeType')
+}
+
+/**
+ * Open the modes panel and hand back its root, which lives in the document
+ * because the panel is a floating layer.
+ * @param {Element} container - the rendered reader
+ * @returns {Promise<Element>} the open panel
+ */
+async function openModesPanel(container) {
+  // Idempotent: a panel that is already open must not be closed by the call.
+  const open = dom.window.document.querySelector('.er-modes-panel')
+  if (open !== null) return open
+  const toggle = container.querySelector('.er-aids-button')
+  assert.ok(toggle, 'the aids button exists in the bar')
+  await act(async () => { toggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  const panel = dom.window.document.querySelector('.er-modes-panel')
+  assert.ok(panel, 'the aids panel opens')
+  return panel
 }
 
 /**
@@ -107,8 +123,21 @@ async function switchToType(container) {
  * @param {Element} container - the rendered reader
  * @param {string} label - the localized mode label ('reader.modeType', …)
  */
+async function openMore(container) {
+  // Idempotent: clicking the button of an open menu would close it.
+  const open = dom.window.document.querySelector('.er-more-pop')
+  if (open !== null) return open
+  const button = container.querySelector('.er-more-button')
+  assert.ok(button, 'the bar carries the tools menu')
+  await act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  const menu = dom.window.document.querySelector('.er-more-pop')
+  assert.ok(menu, 'the tools menu opens')
+  return menu
+}
 async function switchToMode(container, label) {
-  const modeButton = [...container.querySelectorAll('.er-mode')].find((button) => button.textContent === label)
+  // The practice mode is one click in the top bar: no panel in between.
+  const modeButton = [...container.querySelectorAll('.er-mode-button')]
+    .find((button) => button.getAttribute('title') === label)
   assert.ok(modeButton, `the ${label} mode button must exist`)
   await act(async () => { modeButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
 }
@@ -118,7 +147,8 @@ async function switchToMode(container, label) {
  * @param {Element} container - the rendered reader
  */
 async function switchToParagraphScope(container) {
-  const scopeButton = [...container.querySelectorAll('.er-scope-item')].find((button) => button.textContent === 'reader.scopeParagraph')
+  const panel = await openModesPanel(container)
+  const scopeButton = [...panel.querySelectorAll('.er-segment.is-quiet .er-segment-item')].find((button) => button.textContent === 'reader.scopeParagraph')
   assert.ok(scopeButton, 'the paragraph scope button must exist')
   await act(async () => { scopeButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
 }
@@ -270,40 +300,51 @@ test('the practice panel is three zones with one selected style', async () => {
     }))
   })
 
-  const panel = container.querySelector('.er-modes')
-  assert.ok(panel, 'the practice panel must exist')
-  const modes = panel.querySelector('.er-mode-chips')
-  const scope = panel.querySelector('.er-scope')
-  const aids = panel.querySelector('.er-modes-aids')
-  assert.ok(modes && scope && aids, 'the panel has three zones: mode, unit, aids')
-  assert.equal(modes.querySelectorAll('.er-mode').length, 3)
-  assert.equal(scope.querySelectorAll('.er-scope-item').length, 3)
-
-  // The translation toggle is a reading aid, not a fourth practice unit: it
-  // sits in its own zone so the two decisions never blur together.
-  const translate = aids.querySelector('.er-translate-toggle')
-  assert.ok(translate, 'the translation toggle lives in the aids zone')
-  assert.equal(scope.contains(translate), false)
-
-  // Exactly one mode and one unit are selected; a toggle is neither.
-  assert.equal(panel.querySelectorAll('[aria-pressed="true"]').length, 2)
-
-  // Each zone carries its own accessible name, and the aid zone does not reuse
-  // the mode zone's name: a screen reader would hear two "learning modes".
-  assert.equal(modes.getAttribute('role'), 'group')
-  assert.equal(scope.getAttribute('role'), 'group')
-  assert.equal(aids.getAttribute('role'), 'group')
-  assert.notEqual(aids.getAttribute('aria-label'), modes.getAttribute('aria-label'))
-
-  // Choosing closes the panel and hands focus back to its toggle, so the row
-  // does not linger behind :focus-within.
-  const toggle = container.querySelector('.er-modes-toggle')
+  // Three mode buttons in the bar; the aids button opens the unit + aids panel.
+  assert.equal(container.querySelectorAll('.er-mode-button').length, 3, 'one button per practice mode')
+  const toggle = container.querySelector('.er-aids-button')
+  assert.ok(toggle, 'the aids button exists in the bar')
   await act(async () => { toggle.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
-  assert.match(container.querySelector('.er-reader').className, /is-modes-open/)
-  const paragraphChip = [...container.querySelectorAll('.er-scope-item')]
-    .find((chip) => chip.textContent === 'reader.scopeParagraph')
+  const panel = dom.window.document.querySelector('.er-modes-panel')
+  assert.ok(panel, 'the practice panel must exist')
+  const groups = panel.querySelectorAll('.er-modes-group')
+  const scope = panel.querySelector('.er-segment.is-quiet')
+  const aids = panel.querySelector('.er-aid-chip')
+  assert.ok(groups.length === 2 && scope && aids, 'the panel carries the practice unit and the aids')
+  assert.equal(scope.querySelectorAll('.er-segment-item').length, 3)
+
+  // The translation is a reading aid, not a fourth practice unit: it is one of
+  // the aid toggles, and the unit row knows nothing about it.
+  const aidsGrid = panel.querySelector('.er-aid-grid')
+  const translateChip = [...aidsGrid.querySelectorAll('.er-aid-chip')]
+    .find((chip) => chip.textContent.includes('reader.aidTranslate'))
+  assert.ok(translateChip, 'the translation switch lives with the reading aids')
+  assert.equal(scope.contains(translateChip), false)
+
+  // Exactly one unit is selected; a toggle is neither.
+  assert.equal(panel.querySelectorAll('.er-segment-item[aria-pressed="true"]').length, 1, 'the current unit is marked')
+
+  // Each choice group carries its own accessible name, and the reading aids are
+  // toggles rather than choices: a screen reader hears a different thing.
+  assert.equal(groups[0].getAttribute('role'), 'group')
+  assert.equal(groups[1].getAttribute('role'), 'group')
+  assert.notEqual(groups[0].getAttribute('aria-label'), groups[1].getAttribute('aria-label'))
+  assert.equal(panel.querySelectorAll('.er-aid-chip').length, 6, 'the reading aids are six toggles')
+
+  // Choosing a unit keeps the panel open: the learner usually sets the unit and
+  // an aid in the same visit, and a panel that vanishes mid-setting is a chore.
+  const paragraphChip = [...scope.querySelectorAll('.er-segment-item')].find((chip) => chip.textContent === 'reader.scopeParagraph')
   await act(async () => { paragraphChip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
-  assert.doesNotMatch(container.querySelector('.er-reader').className, /is-modes-open/)
+  assert.ok(dom.window.document.querySelector('.er-modes-panel'), 'the panel stays open while setting it up')
+  assert.equal(paragraphChip.getAttribute('aria-pressed'), 'true')
+
+  // A mode is one click in the bar, no panel involved.
+  await act(async () => {
+    const typeButton = [...container.querySelectorAll('.er-mode-button')].find((button) => button.getAttribute('title') === 'reader.modeType')
+    typeButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+  })
+  assert.match(container.querySelector('.er-reader').className, /is-mode-type/)
+  assert.ok(dom.window.document.querySelector('.er-modes-panel'), 'the panel is not closed by a mode switch')
 
   await act(async () => { root.unmount() })
 })
@@ -432,7 +473,8 @@ test('the reader shows the whole paragraph and marks the active sentence', async
   assert.equal(container.querySelectorAll('.er-word.is-muted').length, 10)
 
   // Switching the practice unit to the paragraph takes every word as target.
-  const scopeParagraph = [...container.querySelectorAll('.er-scope-item')].find((button) => button.textContent === 'reader.scopeParagraph')
+  const scopePanel = await openModesPanel(container)
+  const scopeParagraph = [...scopePanel.querySelectorAll('.er-segment.is-quiet .er-segment-item')].find((button) => button.textContent === 'reader.scopeParagraph')
   assert.ok(scopeParagraph, 'the scope switch must exist')
   await act(async () => { scopeParagraph.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   assert.equal(container.querySelectorAll('.er-word.is-muted').length, 0)
@@ -624,31 +666,39 @@ test('the learning modes panel switches the reading aids', async () => {
     }))
   })
 
-  // The vertical toolbar carries the learning modes, the cloze mode, the
-  // settings and the table of contents.
-  const tools = container.querySelectorAll('.er-read-tool')
-  assert.equal(tools.length, 4)
+  // The reading aids, the table of contents and the settings live in the top
+  // bar: the right-edge rail that used to carry them is gone on the desktop.
+  assert.equal(container.querySelectorAll('.er-read-tools').length, 0, 'no rail at the right edge')
+  // The three practice modes are one click each in the bar; the aids button
+  // opens the panel that carries the unit and the aids.
+  assert.equal(container.querySelectorAll('.er-mode-button').length, 3, 'one button per practice mode')
+  const modesButton = container.querySelector('.er-aids-button')
+  const toc = container.querySelector('.er-toc-button')
+  assert.ok(modesButton && toc, 'the bar carries the aids button and the table of contents')
 
-  // The modes panel lists the six reading aids. It floats in the body: it is
+  // The panel lists the six reading aids. It floats in the body: it is
   // anchored to the reader, but nothing inside the reader may clip it.
-  await act(async () => { tools[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
-  assert.equal(dom.window.document.querySelectorAll('.er-modes-panel .er-mode-row').length, 6)
+  await act(async () => { modesButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  // Two groups: the practice decision, then the aid grid.
+  assert.equal(dom.window.document.querySelectorAll('.er-modes-panel .er-modes-group').length, 2)
+  assert.equal(dom.window.document.querySelectorAll('.er-modes-panel .er-aid-chip').length, 6)
   assert.equal(container.querySelectorAll('.er-mode-row').length, 0, 'the panel must not live inside the reader')
 
   // Blur text hides the sentences until they are tapped.
-  const rows = dom.window.document.querySelectorAll('.er-mode-row .er-switch')
-  await act(async () => { rows[3].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  const aidChips = [...dom.window.document.querySelectorAll('.er-modes-panel .er-aid-chip')]
+  const aidNamed = (key) => aidChips.find((chip) => chip.textContent.includes(key))
+  await act(async () => { aidNamed('reader.aidBlur').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   const blurredBefore = container.querySelectorAll('.er-sentence.is-blurred').length
   assert.ok(blurredBefore > 0)
   await act(async () => { container.querySelector('.er-sentence.is-blurred').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   assert.equal(container.querySelectorAll('.er-sentence.is-blurred').length, blurredBefore - 1)
 
   // Bionic reading bolds the beginning of every word.
-  await act(async () => { rows[4].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => { aidNamed('reader.aidBionic').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   assert.ok(container.querySelectorAll('.er-paragraph b').length > 0)
 
   // The table of contents lists the chapters.
-  await act(async () => { tools[3].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await act(async () => { toc.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   assert.equal(container.querySelectorAll('.er-toc-row').length, units.length === 4 ? 2 : 1)
 
   await act(async () => { root.unmount() })
@@ -684,7 +734,7 @@ test('听读模式用左右方向键翻页', async () => {
 
   // The typing mode keeps the arrow keys for the caret.
   await act(async () => {
-    const type = [...container.querySelectorAll('button')].find((b) => b.textContent === 'reader.modeType');
+    const type = [...container.querySelectorAll('.er-mode-button')].find((b) => b.getAttribute('title') === 'reader.modeType');
     type.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
   });
   await press('ArrowRight');
@@ -828,9 +878,9 @@ test('every paragraph carries a note button, and the note is kept', async () => 
     }))
   })
 
-  // One gutter per paragraph, with three buttons in it.
+  // One gutter per paragraph: note, translate, listen, type, read aloud.
   const buttons = container.querySelectorAll('.er-paragraph-action')
-  assert.equal(buttons.length, 6, 'every paragraph has three buttons')
+  assert.equal(buttons.length, 10, 'every paragraph has five buttons')
 
   // The editor floats in the body, next to the paragraph it belongs to.
   await act(async () => { buttons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
@@ -881,9 +931,13 @@ test('翻译语言可以选，翻译请求带着目标语言', async (t) => {
     }))
   })
 
-  // The settings carry the language the translation is made in.
-  const opener = container.querySelector('button[title="reader.toolSettings"]')
-  assert.ok(opener, 'the settings button must exist')
+  // The settings carry the language the translation is made in. The full
+  // settings sheet opens from the typography button in the top bar.
+  const typography = container.querySelector('.er-typography-button')
+  assert.ok(typography, 'the typography button must exist')
+  await act(async () => { typography.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  const opener = dom.window.document.querySelector('.er-setting-more')
+  assert.ok(opener, 'the popover leads to the full settings')
   await act(async () => { opener.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
 
   const picker = dom.window.document.querySelector('.er-settings select')
@@ -938,10 +992,11 @@ test('段落右侧的翻译按钮只翻这一段，朗读按钮只读这一段',
   const rows = container.querySelectorAll('.er-paragraph-row')
   assert.equal(rows.length, 2, 'two paragraphs on the page')
   const buttons = rows[0].querySelectorAll('.er-paragraph-action')
-  assert.equal(buttons.length, 3, 'note, translate and play')
+  assert.equal(buttons.length, 5, 'note, translate, listen, type and read aloud')
 
   // The translate button asks for that paragraph only.
-  await act(async () => { buttons[1].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  const translateButton = [...buttons].find((button) => button.getAttribute('title') === 'reader.translateThis')
+  await act(async () => { translateButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await act(async () => {})
   const request = requests.find((entry) => entry.method === 'translate')
   assert.ok(request, 'the paragraph must be translated')
@@ -980,13 +1035,12 @@ test('阅读条上挂着思维导图与音频播客两个入口', async () => {
   const bar = container.querySelector('.er-read-bar')
   const buttons = [...bar.querySelectorAll('button')]
   const wordListAt = buttons.findIndex((button) => button.classList.contains('er-wordlist-button'))
-  const mindMapAt = buttons.findIndex((button) => button.getAttribute('aria-label') === 'mindmap.open')
-  const podcastAt = buttons.findIndex((button) => button.getAttribute('aria-label') === 'podcast.open')
+  const moreAt = buttons.findIndex((button) => button.classList.contains('er-more-button'))
   assert.ok(wordListAt >= 0, 'the vocabulary button must be in the read bar')
-  assert.ok(mindMapAt >= 0, 'the mind map button must be in the read bar')
-  assert.ok(podcastAt >= 0, 'the podcast button must be in the read bar')
-  assert.equal(podcastAt - mindMapAt, 1, 'the podcast button sits next to the mind map button')
-  assert.ok(wordListAt > podcastAt, 'the vocabulary button closes the action group')
+  assert.ok(moreAt >= 0, 'the notes, mind map and podcast live in one menu')
+  assert.ok(wordListAt > moreAt, 'the vocabulary button closes the action group')
+  const menuRows = [...(await openMore(container)).querySelectorAll('.er-more-row')].map((row) => row.textContent.trim())
+  assert.deepEqual(menuRows, ['notes.title', 'mindmap.open', 'podcast.open'], 'the menu holds the three occasional tools')
   // The book leads the bar, and the chapter is a chip of its own.
   const title = bar.querySelector('.er-read-title')
   assert.ok(title !== null, 'the bar names the book')
@@ -995,7 +1049,8 @@ test('阅读条上挂着思维导图与音频播客两个入口', async () => {
 
   // The mind map opens its own panel. The model is not reachable in the test,
   // so the panel shows the failure instead of a drawing.
-  const mindMapButton = buttons[mindMapAt]
+  const menu = await openMore(container)
+  const mindMapButton = [...menu.querySelectorAll('.er-more-row')].find((row) => row.textContent.trim() === 'mindmap.open')
   await act(async () => { mindMapButton.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await act(async () => {})
   assert.ok(dom.window.document.querySelector('.er-modal'), 'the mind map panel must open')
@@ -1040,7 +1095,8 @@ test('思维导图的节点能跳回书里对应的那一段', async (t) => {
   })
 
   const bar = container.querySelector('.er-read-bar')
-  const button = [...bar.querySelectorAll('button')].find((entry) => entry.getAttribute('aria-label') === 'mindmap.open')
+  const menu = await openMore(container)
+  const button = [...menu.querySelectorAll('.er-more-row')].find((row) => row.textContent.trim() === 'mindmap.open')
   await act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await act(async () => {})
 
@@ -1090,7 +1146,8 @@ test('播客的范围可以选章节，也可以选全书', async (t) => {
   })
 
   const bar = container.querySelector('.er-read-bar')
-  const button = [...bar.querySelectorAll('button')].find((entry) => entry.getAttribute('aria-label') === 'podcast.open')
+  const menu = await openMore(container)
+  const button = [...menu.querySelectorAll('.er-more-row')].find((row) => row.textContent.trim() === 'podcast.open')
   await act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await act(async () => {})
 
@@ -1169,7 +1226,8 @@ test('播客播放时能插话，说完由主持人接上', async (t) => {
   })
 
   const bar = container.querySelector('.er-read-bar')
-  const button = [...bar.querySelectorAll('button')].find((entry) => entry.getAttribute('aria-label') === 'podcast.open')
+  const menu = await openMore(container)
+  const button = [...menu.querySelectorAll('.er-more-row')].find((row) => row.textContent.trim() === 'podcast.open')
   await act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await act(async () => {})
 

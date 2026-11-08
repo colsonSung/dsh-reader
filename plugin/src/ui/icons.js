@@ -340,6 +340,17 @@ export function CopyIcon(props) {
   });
 }
 
+/** A circled i: what this control does. */
+export function InfoIcon(props) {
+  return glyph({
+    ...props,
+    children: [
+      h('circle', { key: 'a', cx: '8', cy: '8', r: '5.6' }),
+      h('path', { key: 'b', d: 'M8 7.2v3.6M8 5.1v.1' }),
+    ],
+  });
+}
+
 /** A cross: close. */
 export function CloseIcon(props) {
   return glyph({

@@ -92,10 +92,11 @@ test('tts: setLanguage 换回英文时音色也跟着换', () => {
   tts.setVoice('f');
   assert.equal(tts.getVoice().id, 'f');
   tts.setLanguage('en');
-  // 换的是第一个会英语的音色：列表按 name 排序，第一个是 Alice
-  assert.equal(tts.getVoice().id, 'a');
-  assert.equal(tts.getVoice().lang, 'en-GB');
-  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Alice', 'Bob', 'Zoe']);
+  // The English list belongs to the accent: American English keeps the American
+  // voice, not whichever English voice happened to be first alphabetically.
+  assert.equal(tts.getVoice().id, 'z');
+  assert.equal(tts.getVoice().lang, 'en-US');
+  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Zoe']);
 });
 
 test('tts: 新语言没有语音时保留当前音色，朗读器仍然出声', () => {
@@ -117,13 +118,34 @@ test('tts: 没选音色时告诉浏览器要读哪种语言', () => {
   assert.equal(synth.spoken[0].lang, 'zh-CN');
 });
 
-test('tts: 不传 lang 时行为与从前一致：英文语音、按 name 排序', () => {
+test('tts: 不传 lang 时默认美式英语，音色表也只给美式', () => {
   const tts = createTts({ synth: fakeSynth(ENGLISH_MACHINE) });
   assert.equal(tts.getLanguage(), 'en');
-  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Alice', 'Bob', 'Zoe']);
+  assert.equal(tts.getAccent(), 'en-US');
+  assert.deepEqual(tts.listVoices().map((v) => v.name), ['Zoe']);
   tts.setVoice('z');
   assert.equal(tts.getVoice().id, 'z');
   assert.equal(tts.getVoice().name, 'Zoe');
+});
+
+test('tts: 没选音色时也按口音朗读，绝不用机器默认音色', () => {
+  // A machine whose voices include a Japanese one and an Indian English one:
+  // an English sentence must be read by the American voice, not the default.
+  const synth = fakeSynth([
+    { voiceURI: 'j', name: 'Kyoko', lang: 'ja-JP', default: true },
+    { voiceURI: 'i', name: 'Aman', lang: 'en-IN' },
+    { voiceURI: 's', name: 'Samantha', lang: 'en-US' },
+    { voiceURI: 'd', name: 'Daniel', lang: 'en-GB' },
+  ]);
+  const tts = createTts({ synth });
+  tts.speak('The brass lantern sat on the workbench.');
+  assert.equal(synth.spoken[0].lang, 'en-US');
+  assert.equal(synth.spoken[0].voice.voiceURI, 's');
+  // British English swaps the voice, not only the language tag.
+  tts.setAccent('en-GB');
+  tts.speak('The brass lantern sat on the workbench.');
+  assert.equal(synth.spoken[1].lang, 'en-GB');
+  assert.equal(synth.spoken[1].voice.voiceURI, 'd');
 });
 
 test('tts: 云端音色按语言过滤，中文云端音色带中文语言', () => {

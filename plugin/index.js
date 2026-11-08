@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { runAiMethod, serviceOf } from './src/host/ai.js';
 import * as minimax from './src/host/minimax.js';
 import * as gutenberg from './src/host/gutenberg.js';
+import * as speech from './src/host/speech.js';
 import { createShelf } from './src/host/shelf.js';
 
 /** The route the client half posts its requests to. */
@@ -400,14 +401,27 @@ export function apply(ctx) {
                 // The status is the channel's real health: a key that passed the
                 // cheap check, and a channel that is not cooling down. It is
                 // asynchronous because the check is one (cached) MiniMax request.
-                return Response.json({ ok: true, result: await minimax.status(minimaxServices(ctx)) });
+                // The local voice is reported next to it: it is the voice the
+                // reader hears first when it exists.
+                const status = await minimax.status(minimaxServices(ctx));
+                return Response.json({ ok: true, result: { ...status, localTts: speech.localStatus() } });
               }
               if (method === 'tts') {
-                const audio = await minimax.tts({
+                // Local first: the machine's own narrator reads the book; the
+                // cloud is only asked when it cannot.
+                const services = minimaxServices(ctx);
+                const audio = await speech.speak({
                   text: payload?.text,
                   voiceId: payload?.voiceId,
                   speed: payload?.rate,
-                }, minimaxServices(ctx));
+                  accent: payload?.accent,
+                }, {
+                  cloud: (request) => minimax.tts({
+                    text: request.text,
+                    voiceId: request.voiceId,
+                    speed: request.speed,
+                  }, services),
+                });
                 return Response.json({ ok: true, result: audio });
               }
               if (method === 'asr') {

@@ -28,6 +28,9 @@ import { addEntry, listEntries, removeEntry } from '../lib/vocab.js';
 import { recordReading } from '../lib/activity.js';
 import { askAi } from '../lib/ai.js';
 import { blobToBase64, speakWord } from '../lib/speech.js';
+import { createLiveDictation } from '../lib/live-dictation.js';
+import { AUTO_NEXT_DELAY_MS, shouldAdvance } from '../lib/auto-advance.js';
+import { ACCENTS, curateCloudVoices, normalizeAccent } from '../lib/voices.js';
 import { DEFAULT_TRANSLATION_LANGUAGE, TRANSLATION_LANGUAGES } from '../lib/languages.js';
 import { speakCached, warmAudio } from '../lib/tts-cache.js';
 import { createDeadline, describePlayback, nextStep, resolveSegments } from '../lib/playback.js';
@@ -39,8 +42,8 @@ import { NotesPanel } from './notes.js';
 import { MindMapView } from './mindmap.js';
 import { PodcastView } from './podcast.js';
 import {
-  ClozeIcon, CloseIcon, ExitIcon, GlobeIcon, HighlighterIcon, KeyboardIcon, LearningIcon, ListIcon, MicIcon, MindMapIcon,
-  NextIcon, NoteIcon, PauseIcon, PencilIcon, PlayIcon, PodcastIcon, PrevIcon, RepeatIcon,
+  BookIcon, ClozeIcon, CloseIcon, ExitIcon, GlobeIcon, HighlighterIcon, InfoIcon, KeyboardIcon, LearningIcon, ListIcon, MicIcon, MindMapIcon,
+  MoreIcon, NextIcon, NoteIcon, PauseIcon, PencilIcon, PlayIcon, PodcastIcon, PrevIcon, RepeatIcon,
   MutedIcon, SettingsIcon, SoundIcon, TrashIcon, TranslateIcon, WaveIcon,
 } from './icons.js';
 import { WordCard } from './wordcard.js';
@@ -54,6 +57,16 @@ const PAGE_PARAGRAPHS = 6;
 const MIN_PAGE_PARAGRAPHS = 2;
 /** Overflow below this (px) is tolerated with a fade instead of dropping a paragraph. */
 const CLIP_TOLERANCE_PX = 24;
+
+/**
+ * How much of the next paragraph must be on the sheet for the page to keep it.
+ *
+ * A page that fills the paper and ends with a readable part of the next
+ * paragraph reads as "the text continues"; a page that stops early leaves a
+ * band of empty paper under the text, which is the thing the learner noticed.
+ * Two and a half lines is enough to read a clause and enough to see the fade.
+ */
+const MIN_VISIBLE_LINES = 1.1;
 /** The most paragraphs a page may hold, however tall the window is. */
 const MAX_PAGE_PARAGRAPHS = 40;
 
@@ -67,6 +80,17 @@ const MAX_PAGE_PARAGRAPHS = 40;
  *
  * @param {any} element - the element tree, or null when there is nothing to show.
  * @returns {any} the portal, or the element itself when there is no document.
+ */
+/**
+ * Mount a floating layer in the body.
+ *
+ * The reader's colours are custom properties on the plugin's roots (the page,
+ * the modal, the words card, …), so a panel portalled into the body must carry
+ * one of those root class names or it renders without any tokens: transparent
+ * surface, unstyled text. The panel's own class is listed in `TOKENS`.
+ *
+ * @param {any} element - the panel.
+ * @returns {any} the portal, or the element when there is no document.
  */
 function floating(element) {
   if (element === null || element === undefined) return null;
@@ -306,6 +330,62 @@ function format(template, values) {
   );
 }
 
+/** Where the learner's accent choice is kept. */
+const ACCENT_KEY = 'reader:accent';
+
+/** Where the "read on by itself" switch is kept. */
+const AUTO_NEXT_KEY = 'reader:autoNext';
+
+/**
+ * Whether reading aloud should move on to the next sentence by itself.
+ * @returns {boolean} the remembered choice.
+ */
+function loadAutoNext() {
+  try {
+    return globalThis.localStorage?.getItem(AUTO_NEXT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Remember the auto-next choice.
+ * @param {boolean} value - whether the drill should continue on its own.
+ * @returns {void}
+ */
+function saveAutoNext(value) {
+  try {
+    globalThis.localStorage?.setItem(AUTO_NEXT_KEY, value ? '1' : '0');
+  } catch {
+    // A browser that refuses storage keeps the choice for this session only.
+  }
+}
+
+/**
+ * The accent the book is read in.
+ * @returns {'en-US'|'en-GB'}
+ */
+function loadAccent() {
+  try {
+    return normalizeAccent(globalThis.localStorage?.getItem(ACCENT_KEY));
+  } catch {
+    return 'en-US';
+  }
+}
+
+/**
+ * Remember the accent choice.
+ * @param {'en-US'|'en-GB'} accent
+ * @returns {void}
+ */
+function saveAccent(accent) {
+  try {
+    globalThis.localStorage?.setItem(ACCENT_KEY, normalizeAccent(accent));
+  } catch {
+    // A browser that refuses storage keeps the accent for this session only.
+  }
+}
+
 /**
  * Read the typing preferences.
  * @returns {object}
@@ -543,6 +623,45 @@ export function alignSpokenWords(resultWords, practiceWords) {
  * @param {{ word: string, sentence: string }|null} [props.cardRequest] - open the word card for this word
  * @returns {any} the element tree
  */
+/**
+ * Where a floating panel opens, in viewport pixels.
+ *
+ * A top-bar button opens its panel underneath itself, right-aligned; a bottom
+ * rail button opens it above itself and to the left. A panel that ignores the
+ * button it belongs to ends up in the top-left corner of the window, over the
+ * app's own sidebar — which is exactly what happened when the reading aids
+ * moved into the top bar.
+ *
+ * @param {object} input - the geometry.
+ * @param {{left: number, top: number, bottom: number, right: number, below?: boolean}|null} input.anchor
+ * @param {number} input.viewportWidth - the window width.
+ * @param {number} input.viewportHeight - the window height.
+ * @param {number} [input.width] - the panel width.
+ * @param {number} [input.panelHeight] - the panel's maximum height.
+ * @returns {{left: number, top: number, width: number}} the panel box.
+ */
+export function placeModesPanel({ anchor, viewportWidth, viewportHeight, width = 300, panelHeight = 0 }) {
+  const vw = Number.isFinite(viewportWidth) ? viewportWidth : 1024;
+  const vh = Number.isFinite(viewportHeight) ? viewportHeight : 768;
+  const height = Number.isFinite(panelHeight) && panelHeight > 0 ? panelHeight : Math.min(vh * 0.62, 440);
+  const margin = 12;
+  if (anchor === null || anchor === undefined) {
+    return { left: Math.max(margin, vw - width - 16), top: 64, width };
+  }
+  if (anchor.below === true) {
+    return {
+      left: Math.max(margin, Math.min(anchor.right - width, vw - width - margin)),
+      top: Math.max(margin, Math.min(anchor.bottom + 8, vh - height - 16)),
+      width,
+    };
+  }
+  return {
+    left: Math.max(margin, Math.min(anchor.left - width - margin, vw - width - margin)),
+    top: Math.max(margin, Math.min(anchor.top - margin, vh - height - 16)),
+    width,
+  };
+}
+
 export function ReaderView({
   t, book, units, index, onIndexChange, onOpenWordList, cardRequest, onActivity, onExit, autoPlayToken,
 }) {
@@ -556,6 +675,15 @@ export function ReaderView({
   const [audioUrl, setAudioUrl] = useState('');
   const audioUrlRef = useRef('');
   const [asrPending, setAsrPending] = useState(false);
+  // How much of the sentence has matched so far while the learner is still
+  // speaking: the read-aloud marks the words as they come, like typing does.
+  const [liveMatched, setLiveMatched] = useState(null);
+  // A drill, not a take: with this on, a well-read sentence rolls into the next
+  // one recording by itself.
+  const [autoNext, setAutoNext] = useState(loadAutoNext);
+  const autoNextRef = useRef(false);
+  const pendingAutoNextRef = useRef(false);
+  useEffect(() => { autoNextRef.current = autoNext; saveAutoNext(autoNext); }, [autoNext]);
   const [asrDone, setAsrDone] = useState(false);
   const [speechCapture, setSpeechCapture] = useState('');
   const [captureStartedAt, setCaptureStartedAt] = useState(0);
@@ -625,14 +753,19 @@ export function ReaderView({
         speak: (text, options) => speakCached(text, {
           voiceId: options?.voiceId,
           rate: options?.rate,
-          ask: (payload) => askAi('tts', payload),
+          accent: loadAccent(),
+          ask: (payload) => askAi('tts', { ...payload, accent: loadAccent() }),
         }),
       },
       getCloudVoices: () => cloudVoicesRef.current,
       lang: language,
+      // Read once when the engine is built; the state below keeps it in sync.
+      accent: loadAccent(),
     });
   }
   const tts = ttsRef.current;
+
+
 
   const syncRef = useRef(null);
   if (syncRef.current === null) syncRef.current = createSyncDriver({ tts });
@@ -640,6 +773,30 @@ export function ReaderView({
 
   const [voices, setVoices] = useState(() => tts.listVoices());
   const [voiceId, setVoiceId] = useState('');
+  // Which English the book is read in. The choice is the learner's and it is
+  // remembered: American English by default, British English on request.
+  const [accent, setAccentState] = useState(loadAccent);
+  const [localTts, setLocalTts] = useState(null);
+
+  const setAccent = useCallback((next) => {
+    const value = normalizeAccent(next);
+    setAccentState(value);
+    saveAccent(value);
+    tts.setAccent(value);
+    setVoices(tts.listVoices());
+    // Local first: the machine's narrator has both accents, the cloud only the
+    // American one. Then the cloud narrator, then whatever the engine resolves.
+    const localVoice = localTts?.available === true
+      ? `mm:${String(localTts.voices?.[value] ?? '')}`
+      : '';
+    const curated = curateCloudVoices(cloudVoicesRef.current, value);
+    const fallback = tts.listVoices().find((voice) => voice.cloud !== true);
+    const chosen = localVoice !== 'mm:' && localVoice !== ''
+      ? localVoice
+      : (curated.length > 0 ? `mm:${curated[0].id}` : (fallback?.id ?? ''));
+    tts.setVoice(chosen);
+    setVoiceId(chosen);
+  }, [localTts, tts]);
   const [rate, setRate] = useState(1);
   const [spokenWord, setSpokenWord] = useState(-1);
   const [playing, setPlaying] = useState(false);
@@ -676,9 +833,23 @@ export function ReaderView({
   const [translatingParagraph, setTranslatingParagraph] = useState(-1);
   // Where the learning-modes panel is anchored.
   const [modesAnchor, setModesAnchor] = useState(null);
+  // The bar folds its occasional tools into one menu: notes, mind map, podcast.
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [moreAnchor, setMoreAnchor] = useState(null);
+  const moreButtonRef = useRef(null);
+  // Which paragraph owns the right-hand shortcut gutter. Hover alone is not
+  // enough: the gutter column is taller than a short line and sits beside the
+  // text, so moving onto it left the row's :hover box and the next paragraph
+  // took the gutter over. The pointer is tracked here instead, and the gutter
+  // stays with the paragraph it was opened on.
+  const [gutterParagraph, setGutterParagraph] = useState(-1);
   const modesButtonRef = useRef(null);
+  // The reading-aids button in the top bar: it opens the same panel as the
+  // phone's rail button, and the panel must open under it, not beside it.
+  const aidsButtonRef = useRef(null);
   const modesRowRef = useRef(null);
   const modesPanelRef = useRef(null);
+  const morePanelRef = useRef(null);
   const noteEditorRef = useRef(null);
   // The mind map of the chapter being read.
   const [mindMapOpen, setMindMapOpen] = useState(false);
@@ -724,6 +895,7 @@ export function ReaderView({
 
   const recognizerRef = useRef(null);
   const recorderRef = useRef(null);
+  const liveDictationRef = useRef(null);
   // Every recording owns an attempt id. A late ASR response may update only
   // the attempt that created it, never the sentence the learner moved to.
   const speechAttemptRef = useRef(0);
@@ -736,21 +908,56 @@ export function ReaderView({
 
   // 云端音色：宿主报告 MiniMax 可用时拉一次音色表，并默认选一个
   const [cloudReady, setCloudReady] = useState(false);
+  // The machine's own narrator, when it is installed: the voice the reader
+  // hears first, with the cloud as the fallback.
+
+  // The picker lists the machine's narrator first (when it is installed) and
+  // then whatever else can speak the book's language.
+  const voiceChoices = useMemo(() => {
+    const local = localTts?.available === true
+      ? [
+        { id: `mm:${localTts.voices?.['en-US']}`, name: `Kokoro · ${t('reader.accentAmerican')}`, lang: 'en-US', local: true, cloud: true },
+        { id: `mm:${localTts.voices?.['en-GB']}`, name: `Kokoro · ${t('reader.accentBritish')}`, lang: 'en-GB', local: true, cloud: true },
+      ].filter((voice) => voice.id !== 'mm:undefined')
+      : [];
+    return [...local, ...voices];
+  }, [localTts, t, voices]);
+
+  // Why the cloud voice is not in use, when it is not. The reader used to fall
+  // back to the machine's default voice silently, which is how a book ended up
+  // read with an accent nobody asked for.
+  const [cloudVoiceOff, setCloudVoiceOff] = useState('');
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         const status = await askAi('status');
-        if (cancelled || status?.minimax !== true) return;
+        if (cancelled) return;
+        setLocalTts(status?.localTts ?? null);
+        if (status?.minimax !== true) {
+          const reason = String(status?.reason ?? '').trim();
+          setCloudVoiceOff(reason === '' ? t('reader.cloudVoiceMissing') : reason);
+          return;
+        }
+        setCloudVoiceOff('');
         const list = await askAi('voices', { language });
         if (cancelled || !Array.isArray(list) || list.length === 0) return;
         cloudVoicesRef.current = list;
         setCloudReady(true);
         setVoices(tts.listVoices());
-        // 音色表现在中英文混在一起：挑一个会读这本书的语种的，不能盲取第一个。
-        const want = language === 'zh' ? 'zh' : 'en';
-        const chosen = list.find((voice) => String(voice?.lang ?? '').toLowerCase().startsWith(want))
-          ?? list.find((voice) => String(voice?.lang ?? '') === '');
+        if (language === 'en') {
+          // The provider lists narrator voices next to character voices and
+          // voices that speak English with another mother tongue. Only the
+          // narrators are offered, and only for the accent they speak.
+          const curated = curateCloudVoices(list, accent);
+          if (curated.length === 0) return;
+          const first = `mm:${curated[0].id}`;
+          tts.setVoice(first);
+          setVoiceId(first);
+          return;
+        }
+        // 中文：挑一个会读中文的音色，不能盲取第一个。
+        const chosen = list.find((voice) => String(voice?.lang ?? '').toLowerCase().startsWith('zh'));
         if (chosen === undefined) return;
         const first = `mm:${chosen.id}`;
         tts.setVoice(first);
@@ -761,13 +968,37 @@ export function ReaderView({
     };
     void load();
     return () => { cancelled = true; };
-  }, [tts, language]);
+  }, [tts, language, accent]);
 
   // 换了书（换了语种）以后，语音也跟着换：英文音色读不了中文。
   useEffect(() => {
     tts.setLanguage(language);
     setVoices(tts.listVoices());
   }, [language, tts]);
+
+  // A local narrator that arrives after the first paint takes the floor: it is
+  // the voice the reader wanted all along.
+  useEffect(() => {
+    if (localTts?.available !== true) return;
+    if (voiceId !== '') return;
+    const next = `mm:${localTts.voices?.[accent] ?? ''}`;
+    if (next === 'mm:') return;
+    setVoiceId(next);
+    tts.setVoice(next);
+  }, [accent, localTts, tts]);
+
+  // The accent belongs to the engine, not to a single component render.
+  useEffect(() => {
+    tts.setAccent(accent);
+    const list = tts.listVoices();
+    setVoices(list);
+    // Nothing picked yet: name the voice the accent resolves to, so the picker
+    // shows what the learner is hearing.
+    if (voiceId === '' && list.length > 0) {
+      setVoiceId(list[0].id);
+      tts.setVoice(list[0].id);
+    }
+  }, [accent, tts]);
 
   // How many notes does this book have, and which paragraphs already carry
   // one? The list is the source of truth for both.
@@ -847,6 +1078,9 @@ export function ReaderView({
 
   const resetSpokenPractice = useCallback(() => {
     speechAttemptRef.current += 1;
+    liveDictationRef.current?.stop?.();
+    liveDictationRef.current = null;
+    setLiveMatched(null);
     setSpokenResult(null);
     setTranscript('');
     setInterim('');
@@ -860,6 +1094,7 @@ export function ReaderView({
     tts.cancel();
     sync.stop();
     recognizerRef.current?.abort?.();
+    liveDictationRef.current?.stop?.();
     recorderRef.current?.dispose?.();
     interjectRecorderRef.current?.dispose?.();
     if (audioUrlRef.current && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
@@ -1047,6 +1282,9 @@ export function ReaderView({
 
   const stopSpeaking = useCallback(() => {
     speechAttemptRef.current += 1;
+    liveDictationRef.current?.stop?.();
+    liveDictationRef.current = null;
+    setLiveMatched(null);
     tts.cancel();
     recognizerRef.current?.abort?.();
     recorderRef.current?.dispose?.();
@@ -1149,9 +1387,19 @@ export function ReaderView({
     // The paper frame is fixed, so the room a page has is the window inside
     // it: the text fills that window, the sheet never grows.
     const available = scroll.clientHeight;
-    const used = scroll.scrollHeight;
+    // The scroll box cannot answer "is there room left": its scrollHeight is
+    // the taller of the content and the window, so a half-empty sheet reads as
+    // a perfect fit and the page never grows. The last paragraph's bottom edge
+    // is the real end of the text.
+    const blocks = scroll.querySelectorAll('.er-page-paragraph');
+    const lastBlock = blocks[blocks.length - 1];
+    const frame = scroll.getBoundingClientRect();
+    const contentHeight = lastBlock === undefined
+      ? 0
+      : Math.max(0, lastBlock.getBoundingClientRect().bottom - frame.top + scroll.scrollTop);
     if (available < 120) return;
-    const overflow = used - available;
+    const overflow = scroll.scrollHeight - available;
+    const blank = Math.max(0, available - contentHeight);
     // A few missing pixels are the last line's descenders, not a reason to
     // throw a whole paragraph away: only a real overflow drops one, and any
     // overflow that stays is faded out at the paper's edge.
@@ -1162,8 +1410,20 @@ export function ReaderView({
     setClipFade(overflow > 1 ? Math.min(Math.round(overflow) + 4, linePx) : 0);
 
     if (overflow > CLIP_TOLERANCE_PX) {
-      // The probe went one paragraph too far: go back to the best fit.
+      // The probe went one paragraph too far. Keep it anyway when the paragraph
+      // that overflowed still shows a readable part of itself: filling the sheet
+      // beats leaving a band of empty paper under the text.
       if (probingRef.current && bestFitRef.current > 0) {
+        const frame = scroll.getBoundingClientRect();
+        const blocks = scroll.querySelectorAll('.er-page-paragraph');
+        const last = blocks[blocks.length - 1];
+        const visible = last === undefined ? 0 : Math.max(0, frame.bottom - last.getBoundingClientRect().top);
+        if (visible >= linePx * MIN_VISIBLE_LINES) {
+          bestFitRef.current = pageSize;
+          probingRef.current = false;
+          settledRef.current = true;
+          return;
+        }
         setPageSize(bestFitRef.current);
         probingRef.current = false;
         settledRef.current = true;
@@ -1180,7 +1440,7 @@ export function ReaderView({
 
     bestFitRef.current = Math.max(bestFitRef.current, pageSize);
     if (settledRef.current) return;
-    if (used + 60 < available && pageSize < MAX_PAGE_PARAGRAPHS) {
+    if (blank > 24 && pageSize < MAX_PAGE_PARAGRAPHS) {
       probingRef.current = true;
       setPageSize(pageSize + 1);
       return;
@@ -1325,6 +1585,9 @@ export function ReaderView({
     // The playback moves the reader on its own: the word it is speaking must
     // not lose its highlight.
     if (playbackAnchorRef.current !== currentParagraphIndex) setSpokenWord(-1);
+    liveDictationRef.current?.stop?.();
+    liveDictationRef.current = null;
+    setLiveMatched(null);
     setTranscript('');
     setInterim('');
     setSpokenResult(null);
@@ -1979,6 +2242,31 @@ export function ReaderView({
     };
   }, [typographyOpen]);
 
+  // The "More" menu closes the way a menu does.
+  useEffect(() => {
+    if (!moreOpen) return undefined;
+    const onPointerDown = (event) => {
+      const target = event.target;
+      if (morePanelRef.current?.contains?.(target)) return;
+      if (moreButtonRef.current?.contains?.(target)) return;
+      setMoreOpen(false);
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setMoreOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown, true);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [moreOpen]);
+
+  const morePanelStyle = useMemo(() => {
+    const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
+    return placeModesPanel({ anchor: moreAnchor, viewportWidth, viewportHeight: 768, width: 224, panelHeight: 180 });
+  }, [moreAnchor]);
+
   const typographyPanelStyle = useMemo(() => {
     const rect = typographyAnchorRef.current?.getBoundingClientRect?.();
     if (rect === undefined || rect === null) return { right: 16, top: 64 };
@@ -2193,9 +2481,10 @@ export function ReaderView({
     void speakWord(text, {
       voiceId,
       rate: tts.getRate(),
+      accent,
       onError: (error) => { setTtsNote(error?.message ?? t('reader.speakFailed')); },
     });
-  }, [tts, t]);
+  }, [accent, tts, t]);
 
   // Clicking a word opens its card; the card can pronounce it, explain it and
   // save it into the vocabulary list.
@@ -2333,6 +2622,9 @@ export function ReaderView({
     const recorder = createRecorder({
       onStop: async (blob, url) => {
         if (attempt !== speechAttemptRef.current) return;
+        liveDictationRef.current?.stop?.();
+        liveDictationRef.current = null;
+        setLiveMatched(null);
         setSpeaking(false);
         setSpeechCapture('');
         setCaptureStartedAt(0);
@@ -2352,6 +2644,14 @@ export function ReaderView({
             setSpokenResult(aligned);
             setSpeechFeedback(buildSpeechFeedback({ analysis, spokenResult: aligned, transcript: text }));
             setAsrDone(true);
+            // Read well enough? Move to the next sentence and record it too.
+            const hasNext = scope === 'paragraph'
+              ? currentParagraphIndex + 1 < paragraphs.length
+              : index + 1 < units.length;
+            if (shouldAdvance({ enabled: autoNextRef.current, accuracy: aligned.accuracy, hasNext })) {
+              pendingAutoNextRef.current = true;
+              move(1);
+            }
           } else {
             setTtsNote(t('reader.nothingRecognized'));
             setAsrDone(false);
@@ -2364,7 +2664,16 @@ export function ReaderView({
           if (attempt === speechAttemptRef.current) setAsrPending(false);
         }
       },
+      // The voice has stopped: close the recording and go straight to the
+      // analysis. Pressing stop is not part of reading a sentence.
+      onEndOfSpeech: () => {
+        if (attempt !== speechAttemptRef.current) return;
+        recorderRef.current?.stop?.();
+      },
       onError: (error) => {
+        liveDictationRef.current?.stop?.();
+        liveDictationRef.current = null;
+        setLiveMatched(null);
         setSpeaking(false);
         setSpeechCapture('');
         setCaptureStartedAt(0);
@@ -2376,8 +2685,26 @@ export function ReaderView({
     setSpeaking(true);
     setSpeechCapture('recorder');
     setCaptureStartedAt(Date.now());
+    setLiveMatched(null);
     try {
       await recorder.start();
+      // While the learner speaks, the audio so far is transcribed again every
+      // few seconds and the words of the sentence light up as they match: the
+      // read-aloud gives the same feedback the typing mode does.
+      const live = createLiveDictation({
+        target,
+        snapshot: () => recorder.snapshot?.() ?? null,
+        toBase64: (blob) => blobToBase64(blob),
+        askAsr: (payload) => askAi('asr', payload),
+        onPartial: ({ text, aligned }) => {
+          if (attempt !== speechAttemptRef.current) return;
+          setTranscript(text);
+          setSpokenResult(aligned);
+          setLiveMatched(typeof aligned?.accuracy === 'number' ? aligned.accuracy : null);
+        },
+      });
+      liveDictationRef.current = live;
+      live.start();
     } catch (error) {
       setSpeaking(false);
       setSpeechCapture('');
@@ -2390,6 +2717,11 @@ export function ReaderView({
     setSpeaking(false);
     setSpeechCapture('');
     setCaptureStartedAt(0);
+    // The final transcription is the one that decides; a partial still in
+    // flight must not overwrite it.
+    liveDictationRef.current?.stop?.();
+    liveDictationRef.current = null;
+    setLiveMatched(null);
     recorderRef.current?.stop?.();
   }, []);
 
@@ -2403,6 +2735,17 @@ export function ReaderView({
     const next = Math.max(0, Math.min(units.length - 1, index + delta));
     goTo(next);
   }, [scope, paragraphs, currentParagraphIndex, index, units.length, goTo]);
+
+  // The drill continues by itself: a sentence that was read well advanced the
+  // page already, and this starts the next recording on it once the analysis
+  // of the previous one is done. A short beat lets the verdict be seen first.
+  useEffect(() => {
+    if (!pendingAutoNextRef.current) return undefined;
+    if (mode !== 'speak' || speaking || asrPending) return undefined;
+    pendingAutoNextRef.current = false;
+    const timer = setTimeout(() => { void startRecording(); }, AUTO_NEXT_DELAY_MS);
+    return () => { clearTimeout(timer); };
+  }, [index, currentParagraphIndex, mode, speaking, asrPending, startRecording]);
 
   // Typing runs through the book: once the sentence is written the reader
   // moves on by itself. A short pause lets the learner see the finished word
@@ -2515,7 +2858,9 @@ export function ReaderView({
       const state = spokenStates[practiceIndex];
       if (state === 'ok') return ' is-ok';
       if (state === 'bad') return ' is-bad';
-      if (state === null) return ' is-missing';
+      // While the dictation is live, a word that has not been reached yet is
+      // not a missed word: only the words in flight carry a mark.
+      if (state === null) return liveMatched !== null ? '' : ' is-missing';
       return '';
     }
     if (mode === 'listen' && position === spokenWord) return ' is-spoken';
@@ -2793,52 +3138,86 @@ export function ReaderView({
     h(
       'div',
       { className: 'er-read-actions' },
-      h(
-        'button',
-        {
-          type: 'button',
-          ref: modesToggleRef,
-          className: 'er-round-icon er-modes-toggle',
-          title: t('reader.toolModes'),
-          'aria-label': t('reader.toolModes'),
-          'aria-pressed': modesOpen,
-          onClick: () => { setModesOpen((value) => !value); },
-        },
-        h(LearningIcon, { size: 16 }),
+      // The practice mode is the decision the page is built around: three
+      // buttons in the bar, one click, no panel in between. The phone keeps its
+      // own strip and bottom bar, so these are desktop controls.
+      phone ? null : h(
+        'div',
+        { className: 'er-mode-segment', role: 'group', 'aria-label': t('reader.toolModes') },
+        [
+          ['listen', t('reader.modeListen'), SoundIcon],
+          ['type', t('reader.modeType'), KeyboardIcon],
+          ['speak', t('reader.modeSpeak'), MicIcon],
+        ].map(([value, label, Icon]) => h(
+          'button',
+          {
+            key: value,
+            type: 'button',
+            className: 'er-round-icon er-mode-button',
+            title: label,
+            'aria-label': label,
+            'aria-pressed': mode === value,
+            onClick: () => { setMode(value); stopSpeaking(); },
+          },
+          h(Icon, { size: 15 }),
+        )),
       ),
+      // The practice unit and the reading aids: secondary, so they live in the
+      // panel that this button opens. Switching them keeps it open.
+      phone ? null : h(
+        'button',
+        {
+          type: 'button',
+          ref: aidsButtonRef,
+          className: 'er-round-icon er-aids-button',
+          title: t('reader.toolAids'),
+          'aria-label': t('reader.toolAids'),
+          'aria-expanded': modePanelOpen,
+          onClick: () => {
+            const rect = aidsButtonRef.current?.getBoundingClientRect?.();
+            if (rect !== undefined && rect !== null) {
+              setModesAnchor({ left: rect.left, top: rect.top, bottom: rect.bottom, right: rect.right, below: true });
+            }
+            setModePanelOpen((value) => !value);
+          },
+        },
+        h(HighlighterIcon, { size: 16 }),
+      ),
+      // The table of contents; the phone keeps its bottom bar, so this stays
+      // desktop-only.
+      phone ? null : h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-round-icon er-toc-button',
+          title: t('reader.tocTitle'),
+          'aria-label': t('reader.tocTitle'),
+          onClick: () => { setTocOpen(true); },
+        },
+        h(ListIcon, { size: 16 }),
+      ),
+      // Notes, the mind map and the podcast are occasional: one menu instead of
+      // three icons that crowded the bar into a second line.
       h(
         'button',
         {
           type: 'button',
-          className: 'er-round-icon er-notes-button',
-          title: t('notes.title'),
-          'aria-label': t('notes.title'),
-          onClick: () => { setNotesOpen(true); },
+          ref: moreButtonRef,
+          className: 'er-round-icon er-more-button',
+          title: t('reader.more'),
+          'aria-label': t('reader.more'),
+          'aria-haspopup': 'menu',
+          'aria-expanded': moreOpen,
+          onClick: () => {
+            const rect = moreButtonRef.current?.getBoundingClientRect?.();
+            if (rect !== undefined && rect !== null) {
+              setMoreAnchor({ left: rect.left, top: rect.top, bottom: rect.bottom, right: rect.right, below: true });
+            }
+            setMoreOpen((value) => !value);
+          },
         },
-        h(NoteIcon, { size: 16 }),
+        h(MoreIcon, { size: 16 }),
         noteCount > 0 ? h('span', { className: 'er-notes-badge' }, String(noteCount)) : null,
-      ),
-      h(
-        'button',
-        {
-          type: 'button',
-          className: 'er-round-icon er-read-extra',
-          title: t('mindmap.open'),
-          'aria-label': t('mindmap.open'),
-          onClick: () => { openMindMap(); },
-        },
-        h(MindMapIcon, { size: 16 }),
-      ),
-      h(
-        'button',
-        {
-          type: 'button',
-          className: 'er-round-icon er-read-extra',
-          title: t('podcast.open'),
-          'aria-label': t('podcast.open'),
-          onClick: () => { openPodcast(); },
-        },
-        h(PodcastIcon, { size: 16 }),
       ),
       h(
         'button',
@@ -2849,7 +3228,7 @@ export function ReaderView({
           'aria-label': t('reader.openWordList'),
           onClick: () => { onOpenWordList?.(); },
         },
-        h(ListIcon, { size: 15 }),
+        h(BookIcon, { size: 15 }),
         h('span', { className: 'er-wordlist-label' }, t('reader.wordList')),
         Object.keys(vocabEntries).length > 0
           ? h('span', { className: 'er-wordlist-count' }, String(Object.keys(vocabEntries).length))
@@ -2880,16 +3259,26 @@ export function ReaderView({
     ),
   );
 
+  // Back to the type the reader starts with: the learner changes the font,
+  // then wants the page they started from — not a hunt through three sliders.
+  const resetTypography = useCallback(() => {
+    updateSettings({
+      fontStyle: DEFAULT_TYPING_SETTINGS.fontStyle,
+      fontSize: DEFAULT_TYPING_SETTINGS.fontSize,
+      lineHeight: DEFAULT_TYPING_SETTINGS.lineHeight,
+      columnWidth: DEFAULT_TYPING_SETTINGS.columnWidth,
+    });
+  }, [updateSettings]);
+
   // The panel width feeds the automatic measure: a wide window gets a wider
   // column than the 68-character default, but only while the learner keeps
   // that default.
   const [panelWidth, setPanelWidth] = useState(0);
 
-  // The reading frame: the paper column plus the tools rail, centred. The
-  // column is expressed in `ch` of the reading font, which only resolves
-  // correctly on the paper itself, so the frame is measured from the paper
-  // rather than computed on the toolbar (where `ch` would be the toolbar's
-  // own font).
+  // The reading frame: the paper column, centred. The column is expressed in
+  // `ch` of the reading font, which only resolves correctly on the paper
+  // itself, so the frame is measured from the paper rather than computed on the
+  // toolbar (where `ch` would be the toolbar's own font).
   //
   // The measurement has to be of the width the paper *wants*, not of the
   // width it is currently allowed: the frame constrains the paper, so
@@ -2901,7 +3290,9 @@ export function ReaderView({
     const root = readerRef.current;
     const paper = readingRef.current;
     if (root === null || paper === null) return undefined;
-    const rail = 78;
+    // The tools rail that used to sit at the right edge of the page is gone:
+    // its actions live in the top bar now, so the frame is the paper alone.
+    const rail = 0;
     const gap = 16;
     const padding = 16 * 2;
     let frame = 0;
@@ -2953,17 +3344,13 @@ export function ReaderView({
   // fall off a 390 pixel screen.
   const modesPanelStyle = useMemo(() => {
     if (phone) return undefined;
-    if (modesAnchor === null) return { left: 12, top: 12, width: 300 };
     const viewportWidth = typeof window === 'undefined' ? 1024 : window.innerWidth;
     const viewportHeight = typeof window === 'undefined' ? 768 : window.innerHeight;
-    const width = 300;
-    const left = Math.max(12, Math.min(modesAnchor.left - width - 12, viewportWidth - width - 12));
     // Anchor to the tool itself, not to the mode row: in immersive reading the
     // mode row is a floating layer near the player, and using its bottom would
     // push this panel off the window. Reserve the panel's real maximum height.
     const panelHeight = Math.min(viewportHeight * 0.62, 440);
-    const top = Math.max(12, Math.min(modesAnchor.top - 12, viewportHeight - panelHeight - 16));
-    return { left, top, width };
+    return placeModesPanel({ anchor: modesAnchor, viewportWidth, viewportHeight, width: 332, panelHeight });
   }, [modesAnchor, phone]);
 
   const renderModesPanel = () => h(
@@ -2989,60 +3376,99 @@ export function ReaderView({
         ),
       )
       : null,
+    // How much text a practice covers. Choosing here leaves the panel open: the
+    // learner usually sets the unit and an aid or two in the same visit.
     h(
       'div',
-      { className: 'er-mode-actions', role: 'group', 'aria-label': t('reader.toolModes') },
-      [
-        ['listen', t('reader.modeListen'), SoundIcon],
-        ['type', t('reader.modeType'), KeyboardIcon],
-        ['speak', t('reader.modeSpeak'), MicIcon],
-      ].map(([value, label, Icon]) => h(
-        'button',
-        {
-          key: value,
-          type: 'button',
-          className: 'er-mode',
-          'aria-pressed': mode === value,
-          onClick: () => {
-            setMode(value);
-            setModePanelOpen(false);
-            setModesOpen(false);
-            stopSpeaking();
+      { className: 'er-modes-group', role: 'group', 'aria-label': t('reader.scopeLabel') },
+      h('span', { className: 'er-modes-group-label' }, t('reader.panelUnit')),
+      h(
+        'div',
+        { className: 'er-segment is-quiet', role: 'group', 'aria-label': t('reader.scopeLabel') },
+        h(
+          'button',
+          { type: 'button', className: 'er-segment-item', 'aria-pressed': scope === 'sentence', onClick: () => { setScope('sentence'); stopSpeaking(); } },
+          h('span', { className: 'er-segment-text' }, t('reader.scopeSentence')),
+        ),
+        h(
+          'button',
+          { type: 'button', className: 'er-segment-item', 'aria-pressed': scope === 'paragraph', onClick: () => { setScope('paragraph'); stopSpeaking(); } },
+          h('span', { className: 'er-segment-text' }, t('reader.scopeParagraph')),
+        ),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'er-segment-item',
+            'aria-pressed': isClozeScope,
+            disabled: clozeWords.length === 0,
+            onClick: () => { setScope('cloze'); stopSpeaking(); },
           },
-        },
-        h(Icon, { size: 15 }),
-        h('span', { className: 'er-mode-text' }, label),
-      )),
+          h('span', { className: 'er-segment-text' }, t('reader.scopeCloze')),
+        ),
+      ),
     ),
-    [
-      ['highlight', t('reader.modeHighlight'), t('reader.modeHighlightHint')],
-      ['gloss', t('reader.modeGloss'), t('reader.modeGlossHint')],
-      ['translate', t('reader.modeTranslate'), t('reader.modeTranslateHint')],
-      ['blur', t('reader.modeBlur'), t('reader.modeBlurHint')],
-      ['bionic', t('reader.modeBionic'), t('reader.modeBionicHint')],
-      ['limitLookups', t('reader.modeLimit'), t('reader.modeLimitHint')],
-    ].map(([key, label, hint]) => h(
+    // The reading aids are secondary: six compact toggles in a grid, each one
+    // named in two words, the explanation in the tooltip. A long sentence under
+    // every switch made a settings screen out of a reading aid.
+    h(
       'div',
-      { key, className: 'er-mode-row' },
+      { className: 'er-modes-group', role: 'group', 'aria-label': t('reader.toolAids') },
+      h('span', { className: 'er-modes-group-label' }, t('reader.toolAids')),
       h(
-        'span',
-        { className: 'er-mode-row-main' },
-        h('span', { className: 'er-mode-row-label' }, label),
-        h('span', { className: 'er-mode-row-hint' }, hint),
+        'div',
+        { className: 'er-aid-grid' },
+        [
+          ['highlight', t('reader.aidHighlight'), t('reader.modeHighlightHint')],
+          ['gloss', t('reader.aidGloss'), t('reader.modeGlossHint')],
+          ['translate', t('reader.aidTranslate'), t('reader.modeTranslateHint')],
+          ['blur', t('reader.aidBlur'), t('reader.modeBlurHint')],
+          ['bionic', t('reader.aidBionic'), t('reader.modeBionicHint')],
+          ['limitLookups', t('reader.aidLimit'), t('reader.modeLimitHint')],
+        ].map(([key, label, hint]) => h(
+          'button',
+          {
+            key,
+            type: 'button',
+            className: 'er-aid-chip',
+            'aria-pressed': modes[key] === true,
+            title: hint,
+            onClick: () => { toggleMode(key); },
+          },
+          h('span', { className: 'er-aid-dot', 'aria-hidden': 'true' }),
+          h('span', { className: 'er-aid-label' }, label),
+        )),
       ),
-      h(
-        'button',
-        {
-          type: 'button',
-          role: 'switch',
-          className: 'er-switch',
-          'aria-checked': modes[key],
-          onClick: () => { toggleMode(key); },
-        },
-      ),
-    )),
+    ),
   );
 
+  /**
+   * The bar's occasional tools, folded into one menu.
+   *
+   * @returns {any} the menu.
+   */
+  const renderMoreMenu = () => {
+    const row = (key, Icon, label, badge, onClick) => h(
+      'button',
+      {
+        key,
+        type: 'button',
+        role: 'menuitem',
+        className: 'er-more-row',
+        onClick: () => { setMoreOpen(false); onClick(); },
+      },
+      h(Icon, { size: 15 }),
+      h('span', { className: 'er-more-label' }, label),
+      badge === null ? null : h('span', { className: 'er-more-badge' }, String(badge)),
+    );
+    return h(
+      'div',
+      { className: 'er-more-pop', style: morePanelStyle, role: 'menu', ref: morePanelRef },
+      row('notes', NoteIcon, t('notes.title'), noteCount > 0 ? noteCount : null, () => { setNotesOpen(true); }),
+      row('mindmap', MindMapIcon, t('mindmap.open'), null, () => { openMindMap(); }),
+      row('podcast', PodcastIcon, t('podcast.open'), null, () => { openPodcast(); }),
+    );
+  };
 
   const renderToc = () => h(
     Modal,
@@ -3068,6 +3494,52 @@ export function ReaderView({
       )),
     ),
   );
+
+  /**
+   * The compact verdict above the read-aloud bar.
+   *
+   * While the recording is running it says how much has matched; after it the
+   * three dimensions and the one suggestion that matters come from the same
+   * data the panel uses. Clicking anywhere opens the panel.
+   */
+  const renderSpeakSummary = () => {
+    if (mode !== 'speak') return null;
+    if (speechFeedback === null && liveMatched === null) return null;
+    const item = (id, label, value, tone) => h(
+      'span',
+      { className: `er-speak-summary-item is-${tone}`, key: id },
+      h('span', { className: 'er-speak-summary-label' }, label),
+      h('span', { className: 'er-speak-summary-value' }, value),
+    );
+    if (speechFeedback === null) {
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: 'er-speak-summary is-live',
+          onClick: () => { setAnalysisOpen(true); },
+          title: t('reader.analysisOpen'),
+        },
+        item('live', t('reader.liveMatched'), `${Math.round((liveMatched ?? 0) * 100)}%`, 'live'),
+        h('span', { className: 'er-speak-summary-tip' }, t('reader.liveHint')),
+      );
+    }
+    const suggestion = speechFeedback.suggestions[0];
+    return h(
+      'button',
+      {
+        type: 'button',
+        className: 'er-speak-summary',
+        onClick: () => { setAnalysisOpen(true); },
+        title: t('reader.analysisOpen'),
+      },
+      item('voice', t('reader.feedbackVoice'), t(`speech.voice.${speechFeedback.voice.summaryKey}`), speechFeedback.voice.tone),
+      item('intonation', t('reader.feedbackIntonation'), t(`speech.intonation.${speechFeedback.intonation.summaryKey}`), speechFeedback.intonation.tone),
+      item('pronunciation', t('reader.feedbackPronunciation'), `${Math.round(speechFeedback.pronunciation.accuracy * 100)}%`, speechFeedback.pronunciation.tone),
+      suggestion === undefined ? null : h('span', { className: 'er-speak-summary-tip' }, t(`speech.suggestion.${suggestion}`)),
+      h('span', { className: 'er-speak-summary-more', 'aria-hidden': 'true' }, '›'),
+    );
+  };
 
   const renderTools = () => {
     const tool = (key, icon, label, options = {}) => h(
@@ -3113,21 +3585,11 @@ export function ReaderView({
         onClick: () => { setTocOpen(true); setModePanelOpen(false); },
       }),
     );
+    // The phone keeps its bottom bar (it is the only room it has); on the
+    // desktop every one of these lives in the top bar now, so nothing floats at
+    // the right edge of the text.
     if (phone) return rail;
-    return h(
-      'div',
-      {
-        className: `er-tools-magnet${toolsOpen ? ' is-open' : ''}`,
-        onPointerEnter: () => { setToolsOpen(true); },
-        onPointerLeave: () => { setToolsOpen(false); },
-        onFocus: () => { setToolsOpen(true); },
-        onBlur: (event) => {
-          if (!event.currentTarget.contains(event.relatedTarget)) setToolsOpen(false);
-        },
-      },
-      h('div', { className: 'er-tools-tab', 'aria-hidden': 'true' }, '‹'),
-      rail,
-    );
+    return null;
   };
 
   // The colour of a saved word follows its state: known words are green,
@@ -3237,6 +3699,29 @@ export function ReaderView({
         speaking ? h(PauseIcon, { size: 13 }) : h(PlayIcon, { size: 13 }),
         () => { speakParagraph(group, paragraphIndex); },
         speaking ? ' is-speaking' : '',
+      ),
+      // The two practice modes are one click away from the paragraph itself:
+      // switching from the top bar and then finding the paragraph again is a
+      // detour for the thing this page is actually for.
+      action(
+        t('reader.quickType'),
+        h(KeyboardIcon, { size: 13 }),
+        () => {
+          stopSpeaking();
+          setMode('type');
+          goTo(group.unitIndexes[0]);
+        },
+        mode === 'type' && paragraphIndex === currentParagraphIndex ? ' is-mode' : '',
+      ),
+      action(
+        t('reader.quickSpeak'),
+        h(MicIcon, { size: 13 }),
+        () => {
+          stopSpeaking();
+          setMode('speak');
+          goTo(group.unitIndexes[0]);
+        },
+        mode === 'speak' && paragraphIndex === currentParagraphIndex ? ' is-mode' : '',
       ),
       // After a read-aloud the review lives here, on the right of the text:
       // the passage shows what was said, the panel explains how it sounded.
@@ -3395,9 +3880,15 @@ export function ReaderView({
       }
       bucket.words.push(word);
     }
+    const rowClass = `er-paragraph-row${gutterParagraph === paragraphIndex ? ' is-tools' : ''}`;
     return h(
       'div',
-      { key, className: 'er-paragraph-row' },
+      {
+        key,
+        className: rowClass,
+        onPointerEnter: () => { setGutterParagraph(paragraphIndex); },
+        onPointerLeave: () => { setGutterParagraph((current) => (current === paragraphIndex ? -1 : current)); },
+      },
       h(
         'div',
         { className: 'er-paragraph-main' },
@@ -3713,6 +4204,18 @@ export function ReaderView({
         ),
       ),
       h('div', { className: 'er-play-hint' }, playSummary),
+      // Why the reading voice is the machine's own: the panel is where the
+      // voice is changed, so it is where the reason belongs.
+      cloudVoiceOff === ''
+        ? null
+        : h(
+          'p',
+          { className: 'er-play-note', role: 'status' },
+          format(t('reader.cloudVoiceOff'), {
+            reason: cloudVoiceOff.length > 120 ? `${cloudVoiceOff.slice(0, 117)}…` : cloudVoiceOff,
+            accent: accent === 'en-GB' ? t('reader.accentBritish') : t('reader.accentAmerican'),
+          }),
+        ),
     ),
   );
 
@@ -3855,6 +4358,26 @@ export function ReaderView({
         },
         RATES.map((value) => h('option', { key: value, value: String(value) }, `${value}x`)),
       ),
+      h('span', { className: 'er-label' }, t('reader.accent')),
+      // Two Englishs are a switch, not a list: two chips read faster than a
+      // select and cost a third of the width in a bar that already has two.
+      h(
+        'div',
+        { className: 'er-accent', role: 'group', 'aria-label': t('reader.accent') },
+        ACCENTS.map((value) => h(
+          'button',
+          {
+            key: value,
+            type: 'button',
+            className: 'er-accent-item',
+            'aria-pressed': accent === value,
+            title: value === 'en-GB' ? t('reader.accentBritish') : t('reader.accentAmerican'),
+            'aria-label': value === 'en-GB' ? t('reader.accentBritish') : t('reader.accentAmerican'),
+            onClick: () => setAccent(value),
+          },
+          value === 'en-GB' ? 'UK' : 'US',
+        )),
+      ),
       h('span', { className: 'er-label' }, t('reader.voice')),
       h(
         'select',
@@ -3864,12 +4387,14 @@ export function ReaderView({
           'aria-label': t('reader.voice'),
           onChange: (event) => { setVoiceId(event.target.value); tts.setVoice(event.target.value); },
         },
-        voices.length === 0
+        voiceChoices.length === 0
           ? h('option', { value: '' }, t('reader.noVoice'))
-          : voices.map((voice) => h(
+          : voiceChoices.map((voice) => h(
             'option',
             { key: voice.id, value: voice.id },
-            voice.cloud === true ? `${voice.name} · MiniMax` : `${voice.name} (${voice.lang})`,
+            voice.local === true
+              ? `${voice.name} · ${t('reader.voiceLocal')}`
+              : voice.cloud === true ? `${voice.name} · MiniMax` : `${voice.name} (${voice.lang})`,
           )),
       ),
       h('span', { className: 'er-read-position' }, `${currentParagraphIndex + 1} / ${paragraphs.length}`),
@@ -3882,14 +4407,20 @@ export function ReaderView({
   const speakStatusText = asrPending
     ? t('reader.recognizingNow')
     : speaking
-      ? (speechCapture === 'recorder' ? t('reader.speakStillRecording') : t('reader.listeningNow'))
+      ? (liveMatched !== null
+        // The words are already lighting up: say how much has matched, not
+        // just that the microphone is open.
+        ? format(t('reader.recordingMatched'), { n: Math.round(liveMatched * 100) })
+        : (speechCapture === 'recorder' ? t('reader.speakStillRecording') : t('reader.listeningNow')))
       : asrDone
         ? (spokenResult === null
           ? t('reader.statusEmpty')
           : format(t('reader.statusRecognized'), { n: Math.round((spokenResult.accuracy ?? 0) * 100) }))
         : (!asrAvailable && (!recognitionSupported || asrFailed))
           ? (asrFailed ? t('reader.recognizeFallback') : t('reader.noRecognition'))
-          : t('reader.speakHint');
+          // Idle has nothing to report: the button says what to do, and the
+          // hint lives behind the info icon instead of a truncated sentence.
+          : '';
 
   // On a phone the reading surface keeps its own comfortable measure: the
   // paragraph is capped at 18 pixels and the leading is opened up. A larger
@@ -3921,7 +4452,9 @@ export function ReaderView({
       h(
         'div',
         { className: 'er-read-body' },
-        renderModeRow(),
+        // The floating strip is the phone's practice control. On the desktop the
+        // single panel in the top bar carries the same decisions.
+        phone ? renderModeRow() : null,
         h(
           'div',
           {
@@ -3961,7 +4494,12 @@ export function ReaderView({
             if (groupIndex !== currentParagraphIndex) return renderPlainParagraph(group, groupIndex);
             return h(
               'div',
-              { key: groupIndex, className: 'er-paragraph-row is-active' },
+              {
+                key: groupIndex,
+                className: `er-paragraph-row is-active${gutterParagraph === groupIndex ? ' is-tools' : ''}`,
+                onPointerEnter: () => { setGutterParagraph(groupIndex); },
+                onPointerLeave: () => { setGutterParagraph((current) => (current === groupIndex ? -1 : current)); },
+              },
               h(
                 'div',
                 { className: 'er-paragraph-main' },
@@ -3988,7 +4526,12 @@ export function ReaderView({
     // The mode panels are docked below the reading frame instead of living at the
     // end of the paper card: a control you have to scroll the whole page to reach
     // is not a control. They sit above the player bar and never scroll away.
-    h(
+    // An empty dock is not free: its margins sit between the paper and the
+    // player as a band of nothing. In listen mode the dock holds nothing (the
+    // player is the bar), so it is not rendered at all.
+    (mode === 'listen' && ttsNote === '')
+      ? null
+      : h(
       'div',
       { className: mode === 'type' ? 'er-mode-dock is-typing' : mode === 'speak' ? 'er-mode-dock is-read-aloud' : 'er-mode-dock' },
         mode === 'listen' ? null : renderPlayStatus(),
@@ -4080,10 +4623,71 @@ export function ReaderView({
             ),
           )
           : null,
+        // The short version of the analysis sits above the bar: three numbers
+        // and one line of advice, so the detailed panel is a choice, not a
+        // required click.
+        mode === 'speak' ? renderSpeakSummary() : null,
         mode === 'speak'
           ? h(
             'div',
             { className: 'er-panel er-speak-panel er-speak-bar' },
+            // The one thing to press, on its own: a full pill, not a control in
+            // a row of six.
+            h(
+              'div',
+              { className: 'er-speak-primary' },
+              asrAvailable
+                ? h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'er-btn er-btn-primary er-speak-start',
+                    onClick: speaking ? stopRecording : startRecording,
+                  },
+                  h(MicIcon, { size: 15 }),
+                  speaking ? t('reader.stopReading') : t('reader.startReading'),
+                )
+                : recognitionSupported && !asrFailed
+                  ? h(
+                    'button',
+                    { type: 'button', className: 'er-btn er-btn-primary er-speak-start', onClick: speaking ? stopRecognizing : startRecognizing },
+                    h(MicIcon, { size: 15 }),
+                    speaking ? t('reader.stopReading') : t('reader.startReading'),
+                  )
+                  : h(
+                    'button',
+                    { type: 'button', className: 'er-btn er-btn-primary er-speak-start', onClick: audioUrl ? undefined : startRecording },
+                    h(MicIcon, { size: 15 }),
+                    audioUrl ? t('reader.replayRecording') : t('reader.startRecording'),
+                  ),
+            ),
+            // How it works is a tooltip, not a line of text that has to be
+            // truncated to fit.
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'er-btn er-btn-icon er-speak-info',
+                title: t('reader.speakHint'),
+                'aria-label': t('reader.speakHint'),
+              },
+              h(InfoIcon, { size: 14 }),
+            ),
+            // A drill switch: when it is on, a well-read sentence starts the
+            // next one by itself.
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'er-btn er-speak-auto',
+                'aria-pressed': autoNext,
+                title: t('reader.autoNextHint'),
+                'aria-label': t('reader.autoNext'),
+                onClick: () => { setAutoNext((value) => !value); },
+              },
+              h(RepeatIcon, { size: 13 }),
+              h('span', { className: 'er-speak-auto-label' }, t('reader.autoNextShort')),
+            ),
             // One line of state: recording, recognizing, or what came out of
             // it. The comparison itself is drawn in the passage.
             h(
@@ -4102,30 +4706,6 @@ export function ReaderView({
             h(
               'div',
               { className: 'er-speak-actions' },
-              asrAvailable
-                ? h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'er-btn er-btn-primary',
-                    onClick: speaking ? stopRecording : startRecording,
-                  },
-                  h(MicIcon, { size: 14 }),
-                  speaking ? t('reader.stopReading') : t('reader.startReading'),
-                )
-                : recognitionSupported && !asrFailed
-                  ? h(
-                    'button',
-                    { type: 'button', className: 'er-btn er-btn-primary', onClick: speaking ? stopRecognizing : startRecognizing },
-                    h(MicIcon, { size: 14 }),
-                    speaking ? t('reader.stopReading') : t('reader.startReading'),
-                  )
-                  : h(
-                    'button',
-                    { type: 'button', className: 'er-btn er-btn-primary', onClick: audioUrl ? undefined : startRecording },
-                    h(MicIcon, { size: 14 }),
-                    audioUrl ? t('reader.replayRecording') : t('reader.startRecording'),
-                  ),
               h(
                 'button',
                 { type: 'button', className: 'er-btn er-btn-icon', title: t('reader.retry'), 'aria-label': t('reader.retry'), onClick: resetSpokenPractice },
@@ -4178,7 +4758,18 @@ export function ReaderView({
         h(
           'div',
           { className: 'er-analysis' },
-          spokenResult === null ? null : h(
+          // While the recording is still running the counts are a moving draft:
+          // "missed" simply means "not reached yet", so the live panel says how
+          // much has matched instead of counting mistakes that have not happened.
+          liveMatched !== null
+            ? h(
+              'div',
+              { className: 'er-stats' },
+              h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.liveMatched')), h('span', { className: 'er-stat-value' }, `${Math.round((liveMatched ?? 0) * 100)}%`)),
+              h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.liveDraft')), h('span', { className: 'er-stat-value' }, t('reader.liveOn'))),
+            )
+            : null,
+          spokenResult === null || liveMatched !== null ? null : h(
             'div',
             { className: 'er-stats' },
             h('span', { className: 'er-stat' }, h('span', { className: 'er-label' }, t('reader.accuracy')), h('span', { className: 'er-stat-value' }, `${Math.round((spokenResult.accuracy ?? 0) * 100)}%`)),
@@ -4357,9 +4948,35 @@ export function ReaderView({
           }),
           h('span', { className: 'er-setting-value' }, `${(1.2 + settings.lineHeight).toFixed(2)}×`),
         ),
+        // Everything else the learner may want to change lives in the full
+        // settings sheet; the bar needs one icon for both.
+        h(
+          'div',
+          { className: 'er-setting-row' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'er-btn er-setting-reset',
+              title: t('reader.resetTypographyHint'),
+              onClick: () => { resetTypography(); },
+            },
+            t('reader.resetTypography'),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'er-btn er-setting-more',
+              onClick: () => { setTypographyOpen(false); setSettingsOpen(true); },
+            },
+            t('reader.allSettings'),
+          ),
+        ),
       ),
     ) : null),
     floating(modePanelOpen ? renderModesPanel() : null),
+    floating(moreOpen ? renderMoreMenu() : null),
     floating(noteEditor === null ? null : renderNoteEditor()),
     mindMapOpen
       ? h(MindMapView, {

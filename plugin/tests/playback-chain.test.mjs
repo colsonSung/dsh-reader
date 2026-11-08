@@ -274,10 +274,7 @@ test('the auto-play stays quiet while the learner is the one talking', async () 
   rememberSettings({ scope: 'paragraph', loop: false, loopCount: 3, limitMinutes: 0, autoPlay: true })
   const { container, root, spoken } = await renderReader()
   // The speaking mode: the learner reads the unit aloud.
-  const speakMode = [...container.querySelectorAll('.er-mode')]
-    .find((button) => button.textContent === 'reader.modeSpeak')
-  assert.ok(speakMode, 'the speaking mode button must exist')
-  await act(async () => { speakMode.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await switchToMode(container, 'reader.modeSpeak')
   await act(async () => { nextButton(container).dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
   await settle(4)
 
@@ -308,12 +305,24 @@ test('the typing bar carries the read-aloud state instead of a floating pill', a
   await settle(4)
 })
 
+/**
+ * Pick a practice mode. The chips live in the top-bar panel now; the floating
+ * strip is the phone's layout.
+ *
+ * @param {Element} container - the rendered reader
+ * @param {string} label - the mode key, e.g. 'reader.modeType'
+ */
+async function switchToMode(container, label) {
+  // The practice mode is one click in the bar now.
+  const chip = [...container.querySelectorAll('.er-mode-button')]
+    .find((entry) => entry.getAttribute('title') === label)
+  assert.ok(chip, 'the ' + label + ' mode button must exist')
+  await act(async () => { chip.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+}
+
 /** Switch the reader into the typing mode. */
 async function switchToTyping(container) {
-  const button = [...container.querySelectorAll('.er-mode')]
-    .find((entry) => entry.textContent === 'reader.modeType')
-  assert.ok(button, 'the typing mode button must exist')
-  await act(async () => { button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })) })
+  await switchToMode(container, 'reader.modeType')
 }
 
 /** Type a word into the typing field the way a learner would. */
